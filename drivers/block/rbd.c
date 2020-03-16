@@ -6147,8 +6147,6 @@ err_out_probe:
 	if (!depth)
 		up_write(&rbd_dev->header_rwsem);
 	if (!depth)
-		up_write(&rbd_dev->header_rwsem);
-	if (!depth)
 		rbd_unregister_watch(rbd_dev);
 	rbd_dev_unprobe(rbd_dev);
 err_out_format:
