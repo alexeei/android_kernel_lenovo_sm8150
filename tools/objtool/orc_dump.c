@@ -139,7 +139,7 @@ int orc_dump(const char *_objname)
 
 		if (!strcmp(name, ".symtab")) {
 			symtab = data;
-			} else if (!strcmp(name, ".strtab")) {
+		} else if (!strcmp(name, ".strtab")) {
 			strtab_idx = i;
 		} else if (!strcmp(name, ".orc_unwind")) {
 			orc = data->d_buf;
