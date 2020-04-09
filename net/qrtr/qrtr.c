@@ -46,6 +46,9 @@
 
 #define AID_VENDOR_QRTR	KGIDT_INIT(2906)
 
+#define GPS_QRTR_SERVICE_ID 0x10
+#define INVALID_PORT 0xff
+
 /**
  * struct qrtr_hdr_v1 - (I|R)PCrouter packet header version 1
  * @version: protocol version
@@ -122,7 +125,7 @@ static inline struct qrtr_sock *qrtr_sk(struct sock *sk)
 	return container_of(sk, struct qrtr_sock, sk);
 }
 
-static unsigned int qrtr_local_nid = CONFIG_QRTR_NODE_ID;
+static unsigned int qrtr_local_nid = 1;
 
 /* for node ids */
 static RADIX_TREE(qrtr_nodes, GFP_KERNEL);
@@ -207,14 +210,11 @@ static void qrtr_log_tx_msg(struct qrtr_node *node, struct qrtr_hdr_v1 *hdr,
 {
 	const struct qrtr_ctrl_pkt *pkt;
 	u64 pl_buf = 0;
-	u32 type;
 
 	if (!hdr || !skb || !skb->data)
 		return;
 
-	type = le32_to_cpu(hdr->type);
-
-	if (type == QRTR_TYPE_DATA) {
+	if (hdr->type == QRTR_TYPE_DATA) {
 		pl_buf = *(u64 *)(skb->data + QRTR_HDR_MAX_SIZE);
 		QRTR_INFO(node->ilc,
 			  "TX DATA: Len:0x%x CF:0x%x src[0x%x:0x%x] dst[0x%x:0x%x] [%08x %08x] [%s]\n",
@@ -225,34 +225,29 @@ static void qrtr_log_tx_msg(struct qrtr_node *node, struct qrtr_hdr_v1 *hdr,
 			  current->comm);
 	} else {
 		pkt = (struct qrtr_ctrl_pkt *)(skb->data + QRTR_HDR_MAX_SIZE);
-		if (type == QRTR_TYPE_NEW_SERVER ||
-		    type == QRTR_TYPE_DEL_SERVER)
+		if (hdr->type == QRTR_TYPE_NEW_SERVER ||
+		    hdr->type == QRTR_TYPE_DEL_SERVER)
 			QRTR_INFO(node->ilc,
 				  "TX CTRL: cmd:0x%x SVC[0x%x:0x%x] addr[0x%x:0x%x]\n",
-				  type, le32_to_cpu(pkt->server.service),
+				  hdr->type, le32_to_cpu(pkt->server.service),
 				  le32_to_cpu(pkt->server.instance),
 				  le32_to_cpu(pkt->server.node),
 				  le32_to_cpu(pkt->server.port));
-		else if (type == QRTR_TYPE_DEL_CLIENT ||
-			 type == QRTR_TYPE_RESUME_TX)
+		else if (hdr->type == QRTR_TYPE_DEL_CLIENT ||
+			 hdr->type == QRTR_TYPE_RESUME_TX)
 			QRTR_INFO(node->ilc,
 				  "TX CTRL: cmd:0x%x addr[0x%x:0x%x]\n",
-				  type, le32_to_cpu(pkt->client.node),
+				  hdr->type, le32_to_cpu(pkt->client.node),
 				  le32_to_cpu(pkt->client.port));
-		else if (type == QRTR_TYPE_HELLO ||
-			 type == QRTR_TYPE_BYE) {
+		else if (hdr->type == QRTR_TYPE_HELLO ||
+			 hdr->type == QRTR_TYPE_BYE)
 			QRTR_INFO(node->ilc,
 				  "TX CTRL: cmd:0x%x node[0x%x]\n",
-				  type, hdr->src_node_id);
-			if (le32_to_cpu(hdr->dst_node_id) == 0 ||
-			    le32_to_cpu(hdr->dst_node_id) == 3)
-				pr_err("qrtr: Modem QMI Readiness TX cmd:0x%x node[0x%x]\n",
-				       type, hdr->src_node_id);
-			}
-		else if (type == QRTR_TYPE_DEL_PROC)
+				  hdr->type, hdr->src_node_id);
+		else if (hdr->type == QRTR_TYPE_DEL_PROC)
 			QRTR_INFO(node->ilc,
 				  "TX CTRL: cmd:0x%x node[0x%x]\n",
-				  type, pkt->proc.node);
+				  hdr->type, pkt->proc.node);
 	}
 }
 
@@ -291,14 +286,10 @@ static void qrtr_log_rx_msg(struct qrtr_node *node, struct sk_buff *skb)
 				  cb->type, le32_to_cpu(pkt->client.node),
 				  le32_to_cpu(pkt->client.port));
 		else if (cb->type == QRTR_TYPE_HELLO ||
-			 cb->type == QRTR_TYPE_BYE) {
+			 cb->type == QRTR_TYPE_BYE)
 			QRTR_INFO(node->ilc,
 				  "RX CTRL: cmd:0x%x node[0x%x]\n",
 				  cb->type, cb->src_node);
-			if (cb->src_node == 0 || cb->src_node == 3)
-				pr_err("qrtr: Modem QMI Readiness RX cmd:0x%x node[0x%x]\n",
-				       cb->type, cb->src_node);
-			}
 	}
 }
 
@@ -563,8 +554,13 @@ static int qrtr_node_enqueue(struct qrtr_node *node, struct sk_buff *skb,
 	hdr->size = cpu_to_le32(len);
 	hdr->confirm_rx = !!confirm_rx;
 
-	skb_put_padto(skb, ALIGN(len, 4) + sizeof(*hdr));
 	qrtr_log_tx_msg(node, hdr, skb);
+	rc = skb_put_padto(skb, ALIGN(len, 4) + sizeof(*hdr));
+	if (rc) {
+		pr_err("%s: failed to pad size %lu to %lu rc:%d\n", __func__,
+		       len, ALIGN(len, 4) + sizeof(*hdr), rc);
+		return rc;
+	}
 
 	mutex_lock(&node->ep_lock);
 	if (node->ep)
@@ -708,6 +704,8 @@ int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len)
 	int frag = false;
 	unsigned int ver;
 	size_t hdrlen;
+	struct qrtr_ctrl_pkt *pkt;
+	static __le32 src_port = INVALID_PORT;
 
 	if (len & 3)
 		return -EINVAL;
@@ -763,7 +761,6 @@ int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len)
 		pr_err("qrtr: Invalid version %d\n", ver);
 		goto err;
 	}
-
 	if (cb->dst_port == QRTR_PORT_CTRL_LEGACY)
 		cb->dst_port = QRTR_PORT_CTRL;
 
@@ -774,8 +771,6 @@ int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len)
 	    cb->type != QRTR_TYPE_RESUME_TX)
 		goto err;
 
-	__pm_wakeup_event(node->ws, 0);
-
 	if (frag) {
 		skb->data_len = size;
 		skb->len = size;
@@ -783,6 +778,29 @@ int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len)
 	} else {
 		skb_put_data(skb, data + hdrlen, size);
 	}
+
+	if (node->ws && node->nid == 0)
+		switch (cb->type) {
+		case QRTR_TYPE_DATA:
+			if (cb->src_port == src_port)
+				__pm_wakeup_event(node->ws, 0);
+			break;
+		case QRTR_TYPE_NEW_SERVER:
+			pkt = (void *)skb->data;
+			//Location service of id is 0x10
+			if (le32_to_cpu(pkt->server.service) ==
+			   GPS_QRTR_SERVICE_ID) {
+				src_port = le32_to_cpu(pkt->server.port);
+				__pm_wakeup_event(node->ws, 0);
+			}
+			break;
+		case QRTR_TYPE_DEL_SERVER:
+			pkt = (void *)skb->data;
+			if (le32_to_cpu(pkt->server.service) ==
+			   GPS_QRTR_SERVICE_ID)
+				src_port = INVALID_PORT;
+			break;
+		}
 	qrtr_log_rx_msg(node, skb);
 
 	skb_queue_tail(&node->rx_queue, skb);
@@ -824,6 +842,24 @@ static struct sk_buff *qrtr_alloc_ctrl_packet(struct qrtr_ctrl_pkt **pkt)
 static struct qrtr_sock *qrtr_port_lookup(int port);
 static void qrtr_port_put(struct qrtr_sock *ipc);
 
+/* Prepare skb for forwarding by allocating enough linear memory to align and
+ * add the header since qrtr transports do not support fragmented skbs
+ */
+static void qrtr_skb_align_linearize(struct sk_buff *skb)
+{
+	int nhead = ALIGN(skb->len, 4) + sizeof(struct qrtr_hdr_v1);
+	int rc;
+
+	if (!skb_is_nonlinear(skb))
+		return;
+
+	rc = pskb_expand_head(skb, nhead, 0, GFP_KERNEL);
+	skb_condense(skb);
+	if (rc)
+		pr_err("%s: failed:%d to allocate linear skb size:%d\n",
+		       __func__, rc, nhead);
+}
+
 static bool qrtr_must_forward(struct qrtr_node *src,
 			      struct qrtr_node *dst, u32 type)
 {
@@ -854,6 +890,7 @@ static void qrtr_fwd_ctrl_pkt(struct sk_buff *skb)
 	struct qrtr_node *src;
 	struct qrtr_cb *cb = (struct qrtr_cb *)skb->cb;
 
+	qrtr_skb_align_linearize(skb);
 	src = qrtr_node_lookup(cb->src_node);
 	down_read(&qrtr_node_lock);
 	list_for_each_entry(node, &qrtr_all_epts, item) {
@@ -888,6 +925,7 @@ static void qrtr_fwd_pkt(struct sk_buff *skb, struct qrtr_cb *cb)
 	struct sockaddr_qrtr to = {AF_QIPCRTR, cb->dst_node, cb->dst_port};
 	struct qrtr_node *node;
 
+	qrtr_skb_align_linearize(skb);
 	node = qrtr_node_lookup(cb->dst_node);
 	if (!node) {
 		kfree_skb(skb);
@@ -1507,20 +1545,21 @@ static int qrtr_sendmsg(struct socket *sock, struct msghdr *msg, size_t len)
 	node = NULL;
 	srv_node = NULL;
 	if (addr->sq_node == QRTR_NODE_BCAST) {
-		enqueue_fn = qrtr_bcast_enqueue;
-		if (addr->sq_port != QRTR_PORT_CTRL) {
+		if (addr->sq_port != QRTR_PORT_CTRL &&
+		    qrtr_local_nid != QRTR_NODE_BCAST) {
 			release_sock(sk);
 			return -EINVAL;
 		}
+		enqueue_fn = qrtr_bcast_enqueue;
 	} else if (addr->sq_node == ipc->us.sq_node) {
 		enqueue_fn = qrtr_local_enqueue;
 	} else {
-		enqueue_fn = qrtr_node_enqueue;
 		node = qrtr_node_lookup(addr->sq_node);
 		if (!node) {
 			release_sock(sk);
 			return -ECONNRESET;
 		}
+		enqueue_fn = qrtr_node_enqueue;
 
 		if (ipc->state > QRTR_STATE_INIT && ipc->state != node->nid)
 			ipc->state = QRTR_STATE_MULTI;
