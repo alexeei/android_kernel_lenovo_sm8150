@@ -6804,10 +6804,8 @@ static void perf_event_task_output(struct perf_event *event,
 		goto out;
 
 	task_event->event_id.pid = perf_event_pid(event, task);
-	
-
 	task_event->event_id.tid = perf_event_tid(event, task);
-	
+
 	if (task_event->event_id.header.type == PERF_RECORD_EXIT) {
 		task_event->event_id.ppid = perf_event_pid(event,
 							task->real_parent);
@@ -9706,7 +9704,7 @@ static void account_event(struct perf_event *event)
 			 * call the perf scheduling hooks before proceeding to
 			 * install events that need them.
 			 */
-			synchronize_rcu();
+			synchronize_sched();
 		}
 		/*
 		 * Now that we have waited for the sync_sched(), allow further
