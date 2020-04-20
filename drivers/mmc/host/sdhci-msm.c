@@ -4740,12 +4740,18 @@ static bool sdhci_msm_is_bootdevice(struct device *dev)
 			return false;
 	}
 
-	/*
-	 * "androidboot.bootdevice=" argument is not present then
-	 * return true as we don't know the boot device anyways.
-	 */
-	return true;
-}
+
+static const struct sdhci_pltfm_data sdhci_msm_pdata = {
+	.quirks = SDHCI_QUIRK_BROKEN_CARD_DETECTION |
+		  SDHCI_QUIRK_NO_CARD_NO_RESET |
+		  SDHCI_QUIRK_SINGLE_POWER_WRITE |
+		  SDHCI_QUIRK_CAP_CLOCK_BASE_BROKEN |
+		  SDHCI_QUIRK_MULTIBLOCK_READ_ACMD12,
+
+	.quirks2 = SDHCI_QUIRK2_PRESET_VALUE_BROKEN,
+	.ops = &sdhci_msm_ops,
+};
+
 
 static int sdhci_msm_probe(struct platform_device *pdev)
 {
