@@ -140,23 +140,6 @@ void dump_backtrace(struct pt_regs *regs, struct task_struct *tsk)
 
 	printk("Call trace:\n");
 	do {
-		if (tsk != current && (cur_state != tsk->state
-			/*
-			 * We would not be printing backtrace for the task
-			 * that has changed state from uninterruptible to
-			 * running before hitting the do-while loop but after
-			 * saving the current state. If task is in running
-			 * state before saving the state, then we may print
-			 * wrong call trace or end up in infinite while loop
-			 * if *(fp) and *(fp+8) are same. While the situation
-			 * will stop print when that task schedule out.
-			 */
-			|| cur_sp != thread_saved_sp(tsk)
-			|| cur_fp != thread_saved_fp(tsk))) {
-			printk("The task:%s had been rescheduled!\n",
-				tsk->comm);
-			break;
-		}
 		/* skip until specified stack frame */
 		if (!skip) {
 			dump_backtrace_entry(frame.pc);
@@ -879,45 +862,8 @@ int __init early_brk64(unsigned long addr, unsigned int esr,
 	return bug_handler(regs, esr) != DBG_HOOK_HANDLED;
 }
 
-static int refcount_overflow_handler(struct pt_regs *regs, unsigned int esr)
-{
-	u32 dummy_cbz = le32_to_cpup((__le32 *)(regs->pc + 4));
-	bool zero = regs->pstate & PSR_Z_BIT;
-	u32 rt;
-
-	/*
-	 * Find the register that holds the counter address from the
-	 * dummy 'cbz' instruction that follows the 'brk' instruction
-	 * that sent us here.
-	 */
-	rt = aarch64_insn_decode_register(AARCH64_INSN_REGTYPE_RT, dummy_cbz);
-
-	/* First unconditionally saturate the refcount. */
-	*(int *)regs->regs[rt] = INT_MIN / 2;
-
-	/*
-	 * This function has been called because either a negative refcount
-	 * value was seen by any of the refcount functions, or a zero
-	 * refcount value was seen by refcount_{add,dec}().
-	 */
-
-	/* point pc to the branch instruction that detected the overflow */
-	regs->pc += 4 + aarch64_get_branch_offset(dummy_cbz);
-	refcount_error_report(regs, zero ? "hit zero" : "overflow");
-
-	/* advance pc and proceed */
-	regs->pc += 4;
-	return DBG_HOOK_HANDLED;
-}
-
-static struct break_hook refcount_break_hook = {
-	.fn	= refcount_overflow_handler,
-	.imm	= REFCOUNT_BRK_IMM,
-};
-
 /* This registration must happen early, before debug_traps_init(). */
 void __init trap_init(void)
 {
 	register_kernel_break_hook(&bug_break_hook);
-	register_kernel_break_hook(&refcount_break_hook);
 }
