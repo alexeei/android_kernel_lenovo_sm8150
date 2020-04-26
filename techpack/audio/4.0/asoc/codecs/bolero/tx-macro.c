@@ -1,72 +1,372 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/clk.h>
 #include <linux/io.h>
 #include <linux/platform_device.h>
-#include <linux/regmap.h>
+#include <linux/clk.h>
 #include <linux/pm_runtime.h>
 #include <sound/soc.h>
+#include <sound/pcm.h>
+#include <sound/pcm_params.h>
 #include <sound/soc-dapm.h>
 #include <sound/tlv.h>
 #include <soc/swr-common.h>
 #include <soc/swr-wcd.h>
+
 #include <asoc/msm-cdc-pinctrl.h>
 #include "bolero-cdc.h"
 #include "bolero-cdc-registers.h"
 #include "bolero-clk-rsc.h"
 
 #define AUTO_SUSPEND_DELAY  50 /* delay in msec */
-#define TX_MACRO_MAX_OFFSET 0x1000
-
-#define NUM_DECIMATORS 8
-
-#define TX_MACRO_RATES (SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000 |\
+#define RX_MACRO_RATES (SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000 |\
 			SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_48000 |\
-			SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_192000)
-#define TX_MACRO_FORMATS (SNDRV_PCM_FMTBIT_S16_LE |\
+			SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_192000 |\
+			SNDRV_PCM_RATE_384000)
+/* Fractional Rates */
+#define RX_MACRO_FRAC_RATES (SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_88200 |\
+				SNDRV_PCM_RATE_176400 | SNDRV_PCM_RATE_352800)
+
+#define RX_MACRO_FORMATS (SNDRV_PCM_FMTBIT_S16_LE |\
+		SNDRV_PCM_FMTBIT_S24_LE |\
+		SNDRV_PCM_FMTBIT_S24_3LE | SNDRV_PCM_FMTBIT_S32_LE)
+
+#define RX_MACRO_ECHO_RATES (SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000 |\
+			SNDRV_PCM_RATE_48000)
+#define RX_MACRO_ECHO_FORMATS (SNDRV_PCM_FMTBIT_S16_LE |\
 		SNDRV_PCM_FMTBIT_S24_LE |\
 		SNDRV_PCM_FMTBIT_S24_3LE)
 
-#define  TX_HPF_CUT_OFF_FREQ_MASK	0x60
-#define  CF_MIN_3DB_4HZ			0x0
-#define  CF_MIN_3DB_75HZ		0x1
-#define  CF_MIN_3DB_150HZ		0x2
+#define SAMPLING_RATE_44P1KHZ   44100
+#define SAMPLING_RATE_88P2KHZ   88200
+#define SAMPLING_RATE_176P4KHZ  176400
+#define SAMPLING_RATE_352P8KHZ  352800
 
-#define TX_MACRO_DMIC_SAMPLE_RATE_UNDEFINED 0
-#define TX_MACRO_MCLK_FREQ 9600000
-#define TX_MACRO_TX_PATH_OFFSET 0x80
-#define TX_MACRO_SWR_MIC_MUX_SEL_MASK 0xF
-#define TX_MACRO_ADC_MUX_CFG_OFFSET 0x2
-#define TX_MACRO_ADC_MODE_CFG0_SHIFT 1
+#define RX_MACRO_MAX_OFFSET 0x1000
 
-#define TX_MACRO_TX_UNMUTE_DELAY_MS	40
+#define RX_MACRO_MAX_DMA_CH_PER_PORT 2
+#define RX_SWR_STRING_LEN 80
+#define RX_MACRO_CHILD_DEVICES_MAX 3
 
-static int tx_unmute_delay = TX_MACRO_TX_UNMUTE_DELAY_MS;
-module_param(tx_unmute_delay, int, 0664);
-MODULE_PARM_DESC(tx_unmute_delay, "delay to unmute the tx path");
+#define RX_MACRO_INTERP_MUX_NUM_INPUTS 3
+#define RX_MACRO_SIDETONE_IIR_COEFF_MAX 5
 
-static const DECLARE_TLV_DB_SCALE(digital_gain, 0, 1, 0);
+#define STRING(name) #name
+#define RX_MACRO_DAPM_ENUM(name, reg, offset, text) \
+static SOC_ENUM_SINGLE_DECL(name##_enum, reg, offset, text); \
+static const struct snd_kcontrol_new name##_mux = \
+		SOC_DAPM_ENUM(STRING(name), name##_enum)
 
-static int tx_macro_hw_params(struct snd_pcm_substream *substream,
-			       struct snd_pcm_hw_params *params,
-			       struct snd_soc_dai *dai);
-static int tx_macro_get_channel_map(struct snd_soc_dai *dai,
-				unsigned int *tx_num, unsigned int *tx_slot,
-				unsigned int *rx_num, unsigned int *rx_slot);
+#define RX_MACRO_DAPM_ENUM_EXT(name, reg, offset, text, getname, putname) \
+static SOC_ENUM_SINGLE_DECL(name##_enum, reg, offset, text); \
+static const struct snd_kcontrol_new name##_mux = \
+		SOC_DAPM_ENUM_EXT(STRING(name), name##_enum, getname, putname)
 
-#define TX_MACRO_SWR_STRING_LEN 80
-#define TX_MACRO_CHILD_DEVICES_MAX 3
+#define RX_MACRO_DAPM_MUX(name, shift, kctl) \
+		SND_SOC_DAPM_MUX(name, SND_SOC_NOPM, shift, 0, &kctl##_mux)
 
-/* Hold instance to soundwire platform device */
-struct tx_macro_swr_ctrl_data {
-	struct platform_device *tx_swr_pdev;
+#define RX_MACRO_RX_PATH_OFFSET 0x80
+#define RX_MACRO_COMP_OFFSET 0x40
+
+#define MAX_IMPED_PARAMS 6
+
+#define RX_MACRO_EC_MIX_TX0_MASK 0xf0
+#define RX_MACRO_EC_MIX_TX1_MASK 0x0f
+#define RX_MACRO_EC_MIX_TX2_MASK 0x0f
+
+#define COMP_MAX_COEFF 25
+
+struct wcd_imped_val {
+	u32 imped_val;
+	u8 index;
 };
 
-struct tx_macro_swr_ctrl_platform_data {
+static const struct wcd_imped_val imped_index[] = {
+	{4, 0},
+	{5, 1},
+	{6, 2},
+	{7, 3},
+	{8, 4},
+	{9, 5},
+	{10, 6},
+	{11, 7},
+	{12, 8},
+	{13, 9},
+};
+
+struct comp_coeff_val {
+	u8 lsb;
+	u8 msb;
+};
+
+enum {
+	HPH_ULP,
+	HPH_LOHIFI,
+	HPH_MODE_MAX,
+};
+
+static const struct comp_coeff_val
+			comp_coeff_table [HPH_MODE_MAX][COMP_MAX_COEFF] = {
+	{
+		{0x40, 0x00},
+		{0x4C, 0x00},
+		{0x5A, 0x00},
+		{0x6B, 0x00},
+		{0x7F, 0x00},
+		{0x97, 0x00},
+		{0xB3, 0x00},
+		{0xD5, 0x00},
+		{0xFD, 0x00},
+		{0x2D, 0x01},
+		{0x66, 0x01},
+		{0xA7, 0x01},
+		{0xF8, 0x01},
+		{0x57, 0x02},
+		{0xC7, 0x02},
+		{0x4B, 0x03},
+		{0xE9, 0x03},
+		{0xA3, 0x04},
+		{0x7D, 0x05},
+		{0x90, 0x06},
+		{0xD1, 0x07},
+		{0x49, 0x09},
+		{0x00, 0x0B},
+		{0x01, 0x0D},
+		{0x59, 0x0F},
+	},
+	{
+		{0x40, 0x00},
+		{0x4C, 0x00},
+		{0x5A, 0x00},
+		{0x6B, 0x00},
+		{0x80, 0x00},
+		{0x98, 0x00},
+		{0xB4, 0x00},
+		{0xD5, 0x00},
+		{0xFE, 0x00},
+		{0x2E, 0x01},
+		{0x66, 0x01},
+		{0xA9, 0x01},
+		{0xF8, 0x01},
+		{0x56, 0x02},
+		{0xC4, 0x02},
+		{0x4F, 0x03},
+		{0xF0, 0x03},
+		{0xAE, 0x04},
+		{0x8B, 0x05},
+		{0x8E, 0x06},
+		{0xBC, 0x07},
+		{0x56, 0x09},
+		{0x0F, 0x0B},
+		{0x13, 0x0D},
+		{0x6F, 0x0F},
+	},
+};
+
+struct rx_macro_reg_mask_val {
+	u16 reg;
+	u8 mask;
+	u8 val;
+};
+
+static const struct rx_macro_reg_mask_val imped_table[][MAX_IMPED_PARAMS] = {
+	{
+		{BOLERO_CDC_RX_RX0_RX_VOL_CTL, 0xff, 0xf2},
+		{BOLERO_CDC_RX_RX0_RX_VOL_MIX_CTL, 0xff, 0xf2},
+		{BOLERO_CDC_RX_RX0_RX_PATH_SEC1, 0x01, 0x00},
+		{BOLERO_CDC_RX_RX1_RX_VOL_CTL, 0xff, 0xf2},
+		{BOLERO_CDC_RX_RX1_RX_VOL_MIX_CTL, 0xff, 0xf2},
+		{BOLERO_CDC_RX_RX1_RX_PATH_SEC1, 0x01, 0x00},
+	},
+	{
+		{BOLERO_CDC_RX_RX0_RX_VOL_CTL, 0xff, 0xf4},
+		{BOLERO_CDC_RX_RX0_RX_VOL_MIX_CTL, 0xff, 0xf4},
+		{BOLERO_CDC_RX_RX0_RX_PATH_SEC1, 0x01, 0x00},
+		{BOLERO_CDC_RX_RX1_RX_VOL_CTL, 0xff, 0xf4},
+		{BOLERO_CDC_RX_RX1_RX_VOL_MIX_CTL, 0xff, 0xf4},
+		{BOLERO_CDC_RX_RX1_RX_PATH_SEC1, 0x01, 0x00},
+	},
+	{
+		{BOLERO_CDC_RX_RX0_RX_VOL_CTL, 0xff, 0xf7},
+		{BOLERO_CDC_RX_RX0_RX_VOL_MIX_CTL, 0xff, 0xf7},
+		{BOLERO_CDC_RX_RX0_RX_PATH_SEC1, 0x01, 0x01},
+		{BOLERO_CDC_RX_RX1_RX_VOL_CTL, 0xff, 0xf7},
+		{BOLERO_CDC_RX_RX1_RX_VOL_MIX_CTL, 0xff, 0xf7},
+		{BOLERO_CDC_RX_RX1_RX_PATH_SEC1, 0x01, 0x01},
+	},
+	{
+		{BOLERO_CDC_RX_RX0_RX_VOL_CTL, 0xff, 0xf9},
+		{BOLERO_CDC_RX_RX0_RX_VOL_MIX_CTL, 0xff, 0xf9},
+		{BOLERO_CDC_RX_RX0_RX_PATH_SEC1, 0x01, 0x00},
+		{BOLERO_CDC_RX_RX1_RX_VOL_CTL, 0xff, 0xf9},
+		{BOLERO_CDC_RX_RX1_RX_VOL_MIX_CTL, 0xff, 0xf9},
+		{BOLERO_CDC_RX_RX1_RX_PATH_SEC1, 0x01, 0x00},
+	},
+	{
+		{BOLERO_CDC_RX_RX0_RX_VOL_CTL, 0xff, 0xfa},
+		{BOLERO_CDC_RX_RX0_RX_VOL_MIX_CTL, 0xff, 0xfa},
+		{BOLERO_CDC_RX_RX0_RX_PATH_SEC1, 0x01, 0x00},
+		{BOLERO_CDC_RX_RX1_RX_VOL_CTL, 0xff, 0xfa},
+		{BOLERO_CDC_RX_RX1_RX_VOL_MIX_CTL, 0xff, 0xfa},
+		{BOLERO_CDC_RX_RX1_RX_PATH_SEC1, 0x01, 0x00},
+	},
+	{
+		{BOLERO_CDC_RX_RX0_RX_VOL_CTL, 0xff, 0xfb},
+		{BOLERO_CDC_RX_RX0_RX_VOL_MIX_CTL, 0xff, 0xfb},
+		{BOLERO_CDC_RX_RX0_RX_PATH_SEC1, 0x01, 0x00},
+		{BOLERO_CDC_RX_RX1_RX_VOL_CTL, 0xff, 0xfb},
+		{BOLERO_CDC_RX_RX1_RX_VOL_MIX_CTL, 0xff, 0xfb},
+		{BOLERO_CDC_RX_RX1_RX_PATH_SEC1, 0x01, 0x00},
+	},
+	{
+		{BOLERO_CDC_RX_RX0_RX_VOL_CTL, 0xff, 0xfc},
+		{BOLERO_CDC_RX_RX0_RX_VOL_MIX_CTL, 0xff, 0xfc},
+		{BOLERO_CDC_RX_RX0_RX_PATH_SEC1, 0x01, 0x00},
+		{BOLERO_CDC_RX_RX1_RX_VOL_CTL, 0xff, 0xfc},
+		{BOLERO_CDC_RX_RX1_RX_VOL_MIX_CTL, 0xff, 0xfc},
+		{BOLERO_CDC_RX_RX1_RX_PATH_SEC1, 0x01, 0x00},
+	},
+	{
+		{BOLERO_CDC_RX_RX0_RX_VOL_CTL, 0xff, 0xfd},
+		{BOLERO_CDC_RX_RX0_RX_VOL_MIX_CTL, 0xff, 0xfd},
+		{BOLERO_CDC_RX_RX0_RX_PATH_SEC1, 0x01, 0x00},
+		{BOLERO_CDC_RX_RX1_RX_VOL_CTL, 0xff, 0xfd},
+		{BOLERO_CDC_RX_RX1_RX_VOL_MIX_CTL, 0xff, 0xfd},
+		{BOLERO_CDC_RX_RX1_RX_PATH_SEC1, 0x01, 0x00},
+	},
+	{
+		{BOLERO_CDC_RX_RX0_RX_VOL_CTL, 0xff, 0xfd},
+		{BOLERO_CDC_RX_RX0_RX_VOL_MIX_CTL, 0xff, 0xfd},
+		{BOLERO_CDC_RX_RX0_RX_PATH_SEC1, 0x01, 0x01},
+		{BOLERO_CDC_RX_RX1_RX_VOL_CTL, 0xff, 0xfd},
+		{BOLERO_CDC_RX_RX1_RX_VOL_MIX_CTL, 0xff, 0xfd},
+		{BOLERO_CDC_RX_RX1_RX_PATH_SEC1, 0x01, 0x01},
+	},
+};
+
+enum {
+	INTERP_HPHL,
+	INTERP_HPHR,
+	INTERP_AUX,
+	INTERP_MAX
+};
+
+enum {
+	RX_MACRO_RX0,
+	RX_MACRO_RX1,
+	RX_MACRO_RX2,
+	RX_MACRO_RX3,
+	RX_MACRO_RX4,
+	RX_MACRO_RX5,
+	RX_MACRO_PORTS_MAX
+};
+
+enum {
+	RX_MACRO_COMP1, /* HPH_L */
+	RX_MACRO_COMP2, /* HPH_R */
+	RX_MACRO_COMP_MAX
+};
+
+enum {
+	RX_MACRO_EC0_MUX = 0,
+	RX_MACRO_EC1_MUX,
+	RX_MACRO_EC2_MUX,
+	RX_MACRO_EC_MUX_MAX,
+};
+
+enum {
+	INTn_1_INP_SEL_ZERO = 0,
+	INTn_1_INP_SEL_DEC0,
+	INTn_1_INP_SEL_DEC1,
+	INTn_1_INP_SEL_IIR0,
+	INTn_1_INP_SEL_IIR1,
+	INTn_1_INP_SEL_RX0,
+	INTn_1_INP_SEL_RX1,
+	INTn_1_INP_SEL_RX2,
+	INTn_1_INP_SEL_RX3,
+	INTn_1_INP_SEL_RX4,
+	INTn_1_INP_SEL_RX5,
+};
+
+enum {
+	INTn_2_INP_SEL_ZERO = 0,
+	INTn_2_INP_SEL_RX0,
+	INTn_2_INP_SEL_RX1,
+	INTn_2_INP_SEL_RX2,
+	INTn_2_INP_SEL_RX3,
+	INTn_2_INP_SEL_RX4,
+	INTn_2_INP_SEL_RX5,
+};
+
+enum {
+	INTERP_MAIN_PATH,
+	INTERP_MIX_PATH,
+};
+
+/* Codec supports 2 IIR filters */
+enum {
+	IIR0 = 0,
+	IIR1,
+	IIR_MAX,
+};
+
+/* Each IIR has 5 Filter Stages */
+enum {
+	BAND1 = 0,
+	BAND2,
+	BAND3,
+	BAND4,
+	BAND5,
+	BAND_MAX,
+};
+
+struct rx_macro_idle_detect_config {
+	u8 hph_idle_thr;
+	u8 hph_idle_detect_en;
+};
+
+struct interp_sample_rate {
+	int sample_rate;
+	int rate_val;
+};
+
+static struct interp_sample_rate sr_val_tbl[] = {
+	{8000, 0x0}, {16000, 0x1}, {32000, 0x3}, {48000, 0x4}, {96000, 0x5},
+	{192000, 0x6}, {384000, 0x7}, {44100, 0x9}, {88200, 0xA},
+	{176400, 0xB}, {352800, 0xC},
+};
+
+struct rx_macro_bcl_pmic_params {
+	u8 id;
+	u8 sid;
+	u8 ppid;
+};
+
+static int rx_macro_hw_params(struct snd_pcm_substream *substream,
+			       struct snd_pcm_hw_params *params,
+			       struct snd_soc_dai *dai);
+static int rx_macro_get_channel_map(struct snd_soc_dai *dai,
+				unsigned int *tx_num, unsigned int *tx_slot,
+				unsigned int *rx_num, unsigned int *rx_slot);
+static int rx_macro_digital_mute(struct snd_soc_dai *dai, int mute);
+static int rx_macro_int_dem_inp_mux_put(struct snd_kcontrol *kcontrol,
+				     struct snd_ctl_elem_value *ucontrol);
+static int rx_macro_mux_get(struct snd_kcontrol *kcontrol,
+			  struct snd_ctl_elem_value *ucontrol);
+static int rx_macro_mux_put(struct snd_kcontrol *kcontrol,
+			  struct snd_ctl_elem_value *ucontrol);
+static int rx_macro_enable_interp_clk(struct snd_soc_codec *codec,
+				      int event, int interp_idx);
+
+/* Hold instance to soundwire platform device */
+struct rx_swr_ctrl_data {
+	struct platform_device *rx_swr_pdev;
+};
+
+struct rx_swr_ctrl_platform_data {
 	void *handle; /* holds codec private data */
 	int (*read)(void *handle, int reg);
 	int (*write)(void *handle, int reg, int val);
@@ -81,2801 +381,3447 @@ struct tx_macro_swr_ctrl_platform_data {
 };
 
 enum {
-	TX_MACRO_AIF_INVALID = 0,
-	TX_MACRO_AIF1_CAP,
-	TX_MACRO_AIF2_CAP,
-	TX_MACRO_AIF3_CAP,
-	TX_MACRO_MAX_DAIS
+	RX_MACRO_AIF_INVALID = 0,
+	RX_MACRO_AIF1_PB,
+	RX_MACRO_AIF2_PB,
+	RX_MACRO_AIF3_PB,
+	RX_MACRO_AIF4_PB,
+	RX_MACRO_AIF_ECHO,
+	RX_MACRO_MAX_DAIS,
 };
 
 enum {
-	TX_MACRO_DEC0,
-	TX_MACRO_DEC1,
-	TX_MACRO_DEC2,
-	TX_MACRO_DEC3,
-	TX_MACRO_DEC4,
-	TX_MACRO_DEC5,
-	TX_MACRO_DEC6,
-	TX_MACRO_DEC7,
-	TX_MACRO_DEC_MAX,
+	RX_MACRO_AIF1_CAP = 0,
+	RX_MACRO_AIF2_CAP,
+	RX_MACRO_AIF3_CAP,
+	RX_MACRO_MAX_AIF_CAP_DAIS
 };
-
-enum {
-	TX_MACRO_CLK_DIV_2,
-	TX_MACRO_CLK_DIV_3,
-	TX_MACRO_CLK_DIV_4,
-	TX_MACRO_CLK_DIV_6,
-	TX_MACRO_CLK_DIV_8,
-	TX_MACRO_CLK_DIV_16,
-};
-
-enum {
-	MSM_DMIC,
-	SWR_MIC,
-	ANC_FB_TUNE1
-};
-
-enum {
-	TX_MCLK,
-	VA_MCLK,
-};
-
-struct tx_macro_reg_mask_val {
-	u16 reg;
-	u8 mask;
-	u8 val;
-};
-
-struct tx_mute_work {
-	struct tx_macro_priv *tx_priv;
-	u32 decimator;
-	struct delayed_work dwork;
-};
-
-struct hpf_work {
-	struct tx_macro_priv *tx_priv;
-	u8 decimator;
-	u8 hpf_cut_off_freq;
-	struct delayed_work dwork;
-};
-
-struct tx_macro_priv {
+/*
+ * @dev: rx macro device pointer
+ * @comp_enabled: compander enable mixer value set
+ * @prim_int_users: Users of interpolator
+ * @rx_mclk_users: RX MCLK users count
+ * @vi_feed_value: VI sense mask
+ * @swr_clk_lock: to lock swr master clock operations
+ * @swr_ctrl_data: SoundWire data structure
+ * @swr_plat_data: Soundwire platform data
+ * @rx_macro_add_child_devices_work: work for adding child devices
+ * @rx_swr_gpio_p: used by pinctrl API
+ * @codec: codec handle
+ */
+struct rx_macro_priv {
 	struct device *dev;
-	bool dec_active[NUM_DECIMATORS];
-	int tx_mclk_users;
+	int comp_enabled[RX_MACRO_COMP_MAX];
+	/* Main path clock users count */
+	int main_clk_users[INTERP_MAX];
+	int rx_port_value[RX_MACRO_PORTS_MAX];
+	u16 prim_int_users[INTERP_MAX];
+	int rx_mclk_users;
 	int swr_clk_users;
 	bool dapm_mclk_enable;
 	bool reset_swr;
+	int clsh_users;
+	int rx_mclk_cnt;
+	bool is_native_on;
+	bool is_ear_mode_on;
+	bool dev_up;
+	bool hph_pwr_mode;
+	bool hph_hd2_mode;
 	struct mutex mclk_lock;
 	struct mutex swr_clk_lock;
+	struct rx_swr_ctrl_data *swr_ctrl_data;
+	struct rx_swr_ctrl_platform_data swr_plat_data;
+	struct work_struct rx_macro_add_child_devices_work;
+	struct device_node *rx_swr_gpio_p;
 	struct snd_soc_codec *codec;
-	struct device_node *tx_swr_gpio_p;
-	struct tx_macro_swr_ctrl_data *swr_ctrl_data;
-	struct tx_macro_swr_ctrl_platform_data swr_plat_data;
-	struct work_struct tx_macro_add_child_devices_work;
-	struct hpf_work tx_hpf_work[NUM_DECIMATORS];
-	struct tx_mute_work tx_mute_dwork[NUM_DECIMATORS];
-	s32 dmic_0_1_clk_cnt;
-	s32 dmic_2_3_clk_cnt;
-	s32 dmic_4_5_clk_cnt;
-	s32 dmic_6_7_clk_cnt;
-	u16 dmic_clk_div;
-	u32 version;
-	u32 is_used_tx_swr_gpio;
-	unsigned long active_ch_mask[TX_MACRO_MAX_DAIS];
-	unsigned long active_ch_cnt[TX_MACRO_MAX_DAIS];
-	char __iomem *tx_io_base;
+	unsigned long active_ch_mask[RX_MACRO_MAX_DAIS];
+	unsigned long active_ch_cnt[RX_MACRO_MAX_DAIS];
+	u16 bit_width[RX_MACRO_MAX_DAIS];
+	char __iomem *rx_io_base;
+	char __iomem *rx_mclk_mode_muxsel;
+	struct rx_macro_idle_detect_config idle_det_cfg;
+	u8 sidetone_coeff_array[IIR_MAX][BAND_MAX]
+		[RX_MACRO_SIDETONE_IIR_COEFF_MAX * 4];
+
 	struct platform_device *pdev_child_devices
-			[TX_MACRO_CHILD_DEVICES_MAX];
+			[RX_MACRO_CHILD_DEVICES_MAX];
 	int child_count;
-	int tx_swr_clk_cnt;
-	int va_swr_clk_cnt;
-	int va_clk_status;
-	int tx_clk_status;
-	bool bcs_enable;
-	int dec_mode[NUM_DECIMATORS];
-	bool bcs_clk_en;
-	bool hs_slow_insert_complete;
+	int is_softclip_on;
+	int is_aux_hpf_on;
+	int softclip_clk_users;
+	struct rx_macro_bcl_pmic_params bcl_pmic_params;
+	u16 clk_id;
+	u16 default_clk_id;
 };
 
-static bool tx_macro_get_data(struct snd_soc_codec *codec,
-			      struct device **tx_dev,
-			      struct tx_macro_priv **tx_priv,
-			      const char *func_name)
+static struct snd_soc_dai_driver rx_macro_dai[];
+static const DECLARE_TLV_DB_SCALE(digital_gain, 0, 1, 0);
+
+static const char * const rx_int_mix_mux_text[] = {
+	"ZERO", "RX0", "RX1", "RX2", "RX3", "RX4", "RX5"
+};
+
+static const char * const rx_prim_mix_text[] = {
+	"ZERO", "DEC0", "DEC1", "IIR0", "IIR1", "RX0", "RX1", "RX2",
+	"RX3", "RX4", "RX5"
+};
+
+static const char * const rx_sidetone_mix_text[] = {
+	"ZERO", "SRC0", "SRC1", "SRC_SUM"
+};
+
+static const char * const iir_inp_mux_text[] = {
+	"ZERO", "DEC0", "DEC1", "DEC2", "DEC3",
+	"RX0", "RX1", "RX2", "RX3", "RX4", "RX5"
+};
+
+static const char * const rx_int_dem_inp_mux_text[] = {
+	"NORMAL_DSM_OUT", "CLSH_DSM_OUT",
+};
+
+static const char * const rx_int0_1_interp_mux_text[] = {
+	"ZERO", "RX INT0_1 MIX1",
+};
+
+static const char * const rx_int1_1_interp_mux_text[] = {
+	"ZERO", "RX INT1_1 MIX1",
+};
+
+static const char * const rx_int2_1_interp_mux_text[] = {
+	"ZERO", "RX INT2_1 MIX1",
+};
+
+static const char * const rx_int0_2_interp_mux_text[] = {
+	"ZERO", "RX INT0_2 MUX",
+};
+
+static const char * const rx_int1_2_interp_mux_text[] = {
+	"ZERO", "RX INT1_2 MUX",
+};
+
+static const char * const rx_int2_2_interp_mux_text[] = {
+	"ZERO", "RX INT2_2 MUX",
+};
+
+static const char *const rx_macro_mux_text[] = {
+	"ZERO", "AIF1_PB", "AIF2_PB", "AIF3_PB", "AIF4_PB"
+};
+
+static const char *const rx_macro_ear_mode_text[] = {"OFF", "ON"};
+static const struct soc_enum rx_macro_ear_mode_enum =
+	SOC_ENUM_SINGLE_EXT(2, rx_macro_ear_mode_text);
+
+static const char *const rx_macro_hph_hd2_mode_text[] = {"OFF", "ON"};
+static const struct soc_enum rx_macro_hph_hd2_mode_enum =
+	SOC_ENUM_SINGLE_EXT(2, rx_macro_hph_hd2_mode_text);
+
+static const char *const rx_macro_hph_pwr_mode_text[] = {"ULP", "LOHIFI"};
+static const struct soc_enum rx_macro_hph_pwr_mode_enum =
+	SOC_ENUM_SINGLE_EXT(2, rx_macro_hph_pwr_mode_text);
+
+static const char * const rx_macro_vbat_bcl_gsm_mode_text[] = {"OFF", "ON"};
+static const struct soc_enum rx_macro_vbat_bcl_gsm_mode_enum =
+	SOC_ENUM_SINGLE_EXT(2, rx_macro_vbat_bcl_gsm_mode_text);
+
+static const struct snd_kcontrol_new rx_int2_1_vbat_mix_switch[] = {
+	SOC_DAPM_SINGLE("RX AUX VBAT Enable", SND_SOC_NOPM, 0, 1, 0)
+};
+
+static const char * const hph_idle_detect_text[] = {"OFF", "ON"};
+
+static SOC_ENUM_SINGLE_EXT_DECL(hph_idle_detect_enum, hph_idle_detect_text);
+
+RX_MACRO_DAPM_ENUM(rx_int0_2, BOLERO_CDC_RX_INP_MUX_RX_INT0_CFG1, 0,
+		rx_int_mix_mux_text);
+RX_MACRO_DAPM_ENUM(rx_int1_2, BOLERO_CDC_RX_INP_MUX_RX_INT1_CFG1, 0,
+		rx_int_mix_mux_text);
+RX_MACRO_DAPM_ENUM(rx_int2_2, BOLERO_CDC_RX_INP_MUX_RX_INT2_CFG1, 0,
+		rx_int_mix_mux_text);
+
+
+RX_MACRO_DAPM_ENUM(rx_int0_1_mix_inp0, BOLERO_CDC_RX_INP_MUX_RX_INT0_CFG0, 0,
+		rx_prim_mix_text);
+RX_MACRO_DAPM_ENUM(rx_int0_1_mix_inp1, BOLERO_CDC_RX_INP_MUX_RX_INT0_CFG0, 4,
+		rx_prim_mix_text);
+RX_MACRO_DAPM_ENUM(rx_int0_1_mix_inp2, BOLERO_CDC_RX_INP_MUX_RX_INT0_CFG1, 4,
+		rx_prim_mix_text);
+RX_MACRO_DAPM_ENUM(rx_int1_1_mix_inp0, BOLERO_CDC_RX_INP_MUX_RX_INT1_CFG0, 0,
+		rx_prim_mix_text);
+RX_MACRO_DAPM_ENUM(rx_int1_1_mix_inp1, BOLERO_CDC_RX_INP_MUX_RX_INT1_CFG0, 4,
+		rx_prim_mix_text);
+RX_MACRO_DAPM_ENUM(rx_int1_1_mix_inp2, BOLERO_CDC_RX_INP_MUX_RX_INT1_CFG1, 4,
+		rx_prim_mix_text);
+RX_MACRO_DAPM_ENUM(rx_int2_1_mix_inp0, BOLERO_CDC_RX_INP_MUX_RX_INT2_CFG0, 0,
+		rx_prim_mix_text);
+RX_MACRO_DAPM_ENUM(rx_int2_1_mix_inp1, BOLERO_CDC_RX_INP_MUX_RX_INT2_CFG0, 4,
+		rx_prim_mix_text);
+RX_MACRO_DAPM_ENUM(rx_int2_1_mix_inp2, BOLERO_CDC_RX_INP_MUX_RX_INT2_CFG1, 4,
+		rx_prim_mix_text);
+
+RX_MACRO_DAPM_ENUM(rx_int0_mix2_inp, BOLERO_CDC_RX_INP_MUX_SIDETONE_SRC_CFG0, 2,
+		rx_sidetone_mix_text);
+RX_MACRO_DAPM_ENUM(rx_int1_mix2_inp, BOLERO_CDC_RX_INP_MUX_SIDETONE_SRC_CFG0, 4,
+		rx_sidetone_mix_text);
+RX_MACRO_DAPM_ENUM(rx_int2_mix2_inp, BOLERO_CDC_RX_INP_MUX_SIDETONE_SRC_CFG0, 6,
+		rx_sidetone_mix_text);
+
+RX_MACRO_DAPM_ENUM(iir0_inp0, BOLERO_CDC_RX_IIR_INP_MUX_IIR0_MIX_CFG0, 0,
+	iir_inp_mux_text);
+RX_MACRO_DAPM_ENUM(iir0_inp1, BOLERO_CDC_RX_IIR_INP_MUX_IIR0_MIX_CFG1, 0,
+	iir_inp_mux_text);
+RX_MACRO_DAPM_ENUM(iir0_inp2, BOLERO_CDC_RX_IIR_INP_MUX_IIR0_MIX_CFG2, 0,
+	iir_inp_mux_text);
+RX_MACRO_DAPM_ENUM(iir0_inp3, BOLERO_CDC_RX_IIR_INP_MUX_IIR0_MIX_CFG3, 0,
+	iir_inp_mux_text);
+RX_MACRO_DAPM_ENUM(iir1_inp0, BOLERO_CDC_RX_IIR_INP_MUX_IIR1_MIX_CFG0, 0,
+	iir_inp_mux_text);
+RX_MACRO_DAPM_ENUM(iir1_inp1, BOLERO_CDC_RX_IIR_INP_MUX_IIR1_MIX_CFG1, 0,
+	iir_inp_mux_text);
+RX_MACRO_DAPM_ENUM(iir1_inp2, BOLERO_CDC_RX_IIR_INP_MUX_IIR1_MIX_CFG2, 0,
+	iir_inp_mux_text);
+RX_MACRO_DAPM_ENUM(iir1_inp3, BOLERO_CDC_RX_IIR_INP_MUX_IIR1_MIX_CFG3, 0,
+	iir_inp_mux_text);
+
+RX_MACRO_DAPM_ENUM(rx_int0_1_interp, SND_SOC_NOPM, 0,
+	rx_int0_1_interp_mux_text);
+RX_MACRO_DAPM_ENUM(rx_int1_1_interp, SND_SOC_NOPM, 0,
+	rx_int1_1_interp_mux_text);
+RX_MACRO_DAPM_ENUM(rx_int2_1_interp, SND_SOC_NOPM, 0,
+	rx_int2_1_interp_mux_text);
+
+RX_MACRO_DAPM_ENUM(rx_int0_2_interp, SND_SOC_NOPM, 0,
+	rx_int0_2_interp_mux_text);
+RX_MACRO_DAPM_ENUM(rx_int1_2_interp, SND_SOC_NOPM, 0,
+	rx_int1_2_interp_mux_text);
+RX_MACRO_DAPM_ENUM(rx_int2_2_interp, SND_SOC_NOPM, 0,
+	rx_int2_2_interp_mux_text);
+
+RX_MACRO_DAPM_ENUM_EXT(rx_int0_dem_inp, BOLERO_CDC_RX_RX0_RX_PATH_CFG1, 0,
+	rx_int_dem_inp_mux_text, snd_soc_dapm_get_enum_double,
+	rx_macro_int_dem_inp_mux_put);
+RX_MACRO_DAPM_ENUM_EXT(rx_int1_dem_inp, BOLERO_CDC_RX_RX1_RX_PATH_CFG1, 0,
+	rx_int_dem_inp_mux_text, snd_soc_dapm_get_enum_double,
+	rx_macro_int_dem_inp_mux_put);
+
+RX_MACRO_DAPM_ENUM_EXT(rx_macro_rx0, SND_SOC_NOPM, 0, rx_macro_mux_text,
+	rx_macro_mux_get, rx_macro_mux_put);
+RX_MACRO_DAPM_ENUM_EXT(rx_macro_rx1, SND_SOC_NOPM, 0, rx_macro_mux_text,
+	rx_macro_mux_get, rx_macro_mux_put);
+RX_MACRO_DAPM_ENUM_EXT(rx_macro_rx2, SND_SOC_NOPM, 0, rx_macro_mux_text,
+	rx_macro_mux_get, rx_macro_mux_put);
+RX_MACRO_DAPM_ENUM_EXT(rx_macro_rx3, SND_SOC_NOPM, 0, rx_macro_mux_text,
+	rx_macro_mux_get, rx_macro_mux_put);
+RX_MACRO_DAPM_ENUM_EXT(rx_macro_rx4, SND_SOC_NOPM, 0, rx_macro_mux_text,
+	rx_macro_mux_get, rx_macro_mux_put);
+RX_MACRO_DAPM_ENUM_EXT(rx_macro_rx5, SND_SOC_NOPM, 0, rx_macro_mux_text,
+	rx_macro_mux_get, rx_macro_mux_put);
+
+static const char * const rx_echo_mux_text[] = {
+	"ZERO", "RX_MIX0", "RX_MIX1", "RX_MIX2"
+};
+
+static const struct soc_enum rx_mix_tx2_mux_enum =
+	SOC_ENUM_SINGLE(BOLERO_CDC_RX_INP_MUX_RX_MIX_CFG5, 0, 4,
+			rx_echo_mux_text);
+
+static const struct snd_kcontrol_new rx_mix_tx2_mux =
+	SOC_DAPM_ENUM("RX MIX TX2_MUX Mux", rx_mix_tx2_mux_enum);
+
+static const struct soc_enum rx_mix_tx1_mux_enum =
+	SOC_ENUM_SINGLE(BOLERO_CDC_RX_INP_MUX_RX_MIX_CFG4, 0, 4,
+			rx_echo_mux_text);
+
+static const struct snd_kcontrol_new rx_mix_tx1_mux =
+	SOC_DAPM_ENUM("RX MIX TX1_MUX Mux", rx_mix_tx1_mux_enum);
+
+static const struct soc_enum rx_mix_tx0_mux_enum =
+	SOC_ENUM_SINGLE(BOLERO_CDC_RX_INP_MUX_RX_MIX_CFG4, 4, 4,
+			rx_echo_mux_text);
+
+static const struct snd_kcontrol_new rx_mix_tx0_mux =
+	SOC_DAPM_ENUM("RX MIX TX0_MUX Mux", rx_mix_tx0_mux_enum);
+
+static struct snd_soc_dai_ops rx_macro_dai_ops = {
+	.hw_params = rx_macro_hw_params,
+	.get_channel_map = rx_macro_get_channel_map,
+	.digital_mute = rx_macro_digital_mute,
+};
+
+static struct snd_soc_dai_driver rx_macro_dai[] = {
+	{
+		.name = "rx_macro_rx1",
+		.id = RX_MACRO_AIF1_PB,
+		.playback = {
+			.stream_name = "RX_MACRO_AIF1 Playback",
+			.rates = RX_MACRO_RATES | RX_MACRO_FRAC_RATES,
+			.formats = RX_MACRO_FORMATS,
+			.rate_max = 384000,
+			.rate_min = 8000,
+			.channels_min = 1,
+			.channels_max = 2,
+		},
+		.ops = &rx_macro_dai_ops,
+	},
+	{
+		.name = "rx_macro_rx2",
+		.id = RX_MACRO_AIF2_PB,
+		.playback = {
+			.stream_name = "RX_MACRO_AIF2 Playback",
+			.rates = RX_MACRO_RATES | RX_MACRO_FRAC_RATES,
+			.formats = RX_MACRO_FORMATS,
+			.rate_max = 384000,
+			.rate_min = 8000,
+			.channels_min = 1,
+			.channels_max = 2,
+		},
+		.ops = &rx_macro_dai_ops,
+	},
+	{
+		.name = "rx_macro_rx3",
+		.id = RX_MACRO_AIF3_PB,
+		.playback = {
+			.stream_name = "RX_MACRO_AIF3 Playback",
+			.rates = RX_MACRO_RATES | RX_MACRO_FRAC_RATES,
+			.formats = RX_MACRO_FORMATS,
+			.rate_max = 384000,
+			.rate_min = 8000,
+			.channels_min = 1,
+			.channels_max = 2,
+		},
+		.ops = &rx_macro_dai_ops,
+	},
+	{
+		.name = "rx_macro_rx4",
+		.id = RX_MACRO_AIF4_PB,
+		.playback = {
+			.stream_name = "RX_MACRO_AIF4 Playback",
+			.rates = RX_MACRO_RATES | RX_MACRO_FRAC_RATES,
+			.formats = RX_MACRO_FORMATS,
+			.rate_max = 384000,
+			.rate_min = 8000,
+			.channels_min = 1,
+			.channels_max = 2,
+		},
+		.ops = &rx_macro_dai_ops,
+	},
+	{
+		.name = "rx_macro_echo",
+		.id = RX_MACRO_AIF_ECHO,
+		.capture = {
+			.stream_name = "RX_AIF_ECHO Capture",
+			.rates = RX_MACRO_ECHO_RATES,
+			.formats = RX_MACRO_ECHO_FORMATS,
+			.rate_max = 48000,
+			.rate_min = 8000,
+			.channels_min = 1,
+			.channels_max = 3,
+		},
+		.ops = &rx_macro_dai_ops,
+	},
+};
+
+static int get_impedance_index(int imped)
 {
-	*tx_dev = bolero_get_device_ptr(codec->dev, TX_MACRO);
-	if (!(*tx_dev)) {
+	int i = 0;
+
+	if (imped < imped_index[i].imped_val) {
+		pr_debug("%s, detected impedance is less than %d Ohm\n",
+			__func__, imped_index[i].imped_val);
+		i = 0;
+		goto ret;
+	}
+	if (imped >= imped_index[ARRAY_SIZE(imped_index) - 1].imped_val) {
+		pr_debug("%s, detected impedance is greater than %d Ohm\n",
+			__func__,
+			imped_index[ARRAY_SIZE(imped_index) - 1].imped_val);
+		i = ARRAY_SIZE(imped_index) - 1;
+		goto ret;
+	}
+	for (i = 0; i < ARRAY_SIZE(imped_index) - 1; i++) {
+		if (imped >= imped_index[i].imped_val &&
+			imped < imped_index[i + 1].imped_val)
+			break;
+	}
+ret:
+	pr_debug("%s: selected impedance index = %d\n",
+			__func__, imped_index[i].index);
+	return imped_index[i].index;
+}
+
+/*
+ * rx_macro_wcd_clsh_imped_config -
+ * This function updates HPHL and HPHR gain settings
+ * according to the impedance value.
+ *
+ * @codec: codec pointer handle
+ * @imped: impedance value of HPHL/R
+ * @reset: bool variable to reset registers when teardown
+ */
+static void rx_macro_wcd_clsh_imped_config(struct snd_soc_codec *codec,
+					   int imped, bool reset)
+{
+	int i;
+	int index = 0;
+	int table_size;
+
+	static const struct rx_macro_reg_mask_val
+				(*imped_table_ptr)[MAX_IMPED_PARAMS];
+
+	table_size = ARRAY_SIZE(imped_table);
+	imped_table_ptr = imped_table;
+	/* reset = 1, which means request is to reset the register values */
+	if (reset) {
+		for (i = 0; i < MAX_IMPED_PARAMS; i++)
+			snd_soc_update_bits(codec,
+				imped_table_ptr[index][i].reg,
+				imped_table_ptr[index][i].mask, 0);
+		return;
+	}
+	index = get_impedance_index(imped);
+	if (index >= (ARRAY_SIZE(imped_index) - 1)) {
+		pr_debug("%s, impedance not in range = %d\n", __func__, imped);
+		return;
+	}
+	if (index >= table_size) {
+		pr_debug("%s, impedance index not in range = %d\n", __func__,
+			index);
+		return;
+	}
+	for (i = 0; i < MAX_IMPED_PARAMS; i++)
+		snd_soc_update_bits(codec,
+				imped_table_ptr[index][i].reg,
+				imped_table_ptr[index][i].mask,
+				imped_table_ptr[index][i].val);
+}
+
+static bool rx_macro_get_data(struct snd_soc_codec *codec,
+			       struct device **rx_dev,
+			       struct rx_macro_priv **rx_priv,
+			       const char *func_name)
+{
+	*rx_dev = bolero_get_device_ptr(codec->dev, RX_MACRO);
+
+	if (!(*rx_dev)) {
 		dev_err(codec->dev,
 			"%s: null device for macro!\n", func_name);
 		return false;
 	}
 
-	*tx_priv = dev_get_drvdata((*tx_dev));
-	if (!(*tx_priv)) {
+	*rx_priv = dev_get_drvdata((*rx_dev));
+	if (!(*rx_priv)) {
 		dev_err(codec->dev,
 			"%s: priv is null for macro!\n", func_name);
 		return false;
 	}
 
-	if (!(*tx_priv)->codec) {
+	if (!(*rx_priv)->codec) {
 		dev_err(codec->dev,
-			"%s: tx_priv->codec not initialized!\n", func_name);
+			"%s: tx_priv codec is not initialized!\n", func_name);
 		return false;
 	}
 
 	return true;
 }
 
-static int tx_macro_mclk_enable(struct tx_macro_priv *tx_priv,
-				bool mclk_enable)
+static int rx_macro_set_port_map(struct snd_soc_codec *codec,
+				u32 usecase, u32 size, void *data)
 {
-	struct regmap *regmap = dev_get_regmap(tx_priv->dev->parent, NULL);
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+	struct swrm_port_config port_cfg;
 	int ret = 0;
 
-	if (regmap == NULL) {
-		dev_err(tx_priv->dev, "%s: regmap is NULL\n", __func__);
-		return -EINVAL;
-	}
-
-	dev_dbg(tx_priv->dev, "%s: mclk_enable = %u,clk_users= %d\n",
-		__func__, mclk_enable, tx_priv->tx_mclk_users);
-
-	mutex_lock(&tx_priv->mclk_lock);
-	if (mclk_enable) {
-		if (tx_priv->tx_mclk_users == 0) {
-			ret = bolero_clk_rsc_request_clock(tx_priv->dev,
-							   TX_CORE_CLK,
-							   TX_CORE_CLK,
-							   true);
-			if (ret < 0) {
-				dev_err_ratelimited(tx_priv->dev,
-					"%s: request clock enable failed\n",
-					__func__);
-				goto exit;
-			}
-			bolero_clk_rsc_fs_gen_request(tx_priv->dev,
-						  true);
-			regcache_mark_dirty(regmap);
-			regcache_sync_region(regmap,
-					TX_START_OFFSET,
-					TX_MAX_OFFSET);
-			/* 9.6MHz MCLK, set value 0x00 if other frequency */
-			regmap_update_bits(regmap,
-				BOLERO_CDC_TX_TOP_CSR_FREQ_MCLK, 0x01, 0x01);
-			regmap_update_bits(regmap,
-				BOLERO_CDC_TX_CLK_RST_CTRL_MCLK_CONTROL,
-				0x01, 0x01);
-			regmap_update_bits(regmap,
-				BOLERO_CDC_TX_CLK_RST_CTRL_FS_CNT_CONTROL,
-				0x01, 0x01);
-		}
-		tx_priv->tx_mclk_users++;
-	} else {
-		if (tx_priv->tx_mclk_users <= 0) {
-			dev_err(tx_priv->dev, "%s: clock already disabled\n",
-				__func__);
-			tx_priv->tx_mclk_users = 0;
-			goto exit;
-		}
-		tx_priv->tx_mclk_users--;
-		if (tx_priv->tx_mclk_users == 0) {
-			regmap_update_bits(regmap,
-				BOLERO_CDC_TX_CLK_RST_CTRL_FS_CNT_CONTROL,
-				0x01, 0x00);
-			regmap_update_bits(regmap,
-				BOLERO_CDC_TX_CLK_RST_CTRL_MCLK_CONTROL,
-				0x01, 0x00);
-			bolero_clk_rsc_fs_gen_request(tx_priv->dev,
-						  false);
-
-			bolero_clk_rsc_request_clock(tx_priv->dev,
-						 TX_CORE_CLK,
-						 TX_CORE_CLK,
-						 false);
-		}
-	}
-exit:
-	mutex_unlock(&tx_priv->mclk_lock);
-	return ret;
-}
-
-static int tx_macro_va_swr_clk_event(struct snd_soc_dapm_widget *w,
-			       struct snd_kcontrol *kcontrol, int event)
-{
-	struct device *tx_dev = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
-	struct snd_soc_codec *codec =
-				snd_soc_dapm_to_codec(w->dapm);
-
-	if (!tx_macro_get_data(codec, &tx_dev, &tx_priv, __func__))
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
 		return -EINVAL;
 
-	if (SND_SOC_DAPM_EVENT_ON(event))
-		++tx_priv->va_swr_clk_cnt;
-	if (SND_SOC_DAPM_EVENT_OFF(event))
-		--tx_priv->va_swr_clk_cnt;
+	memset(&port_cfg, 0, sizeof(port_cfg));
+	port_cfg.uc = usecase;
+	port_cfg.size = size;
+	port_cfg.params = data;
 
-	return 0;
-}
-
-static int tx_macro_tx_swr_clk_event(struct snd_soc_dapm_widget *w,
-			       struct snd_kcontrol *kcontrol, int event)
-{
-	struct device *tx_dev = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
-	struct snd_soc_codec *codec =
-				snd_soc_dapm_to_codec(w->dapm);
-
-	if (!tx_macro_get_data(codec, &tx_dev, &tx_priv, __func__))
-		return -EINVAL;
-
-	if (SND_SOC_DAPM_EVENT_ON(event))
-		++tx_priv->tx_swr_clk_cnt;
-	if (SND_SOC_DAPM_EVENT_OFF(event))
-		--tx_priv->tx_swr_clk_cnt;
-
-	return 0;
-}
-
-static int tx_macro_mclk_event(struct snd_soc_dapm_widget *w,
-			       struct snd_kcontrol *kcontrol, int event)
-{
-	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
-	int ret = 0;
-	struct device *tx_dev = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
-
-	if (!tx_macro_get_data(codec, &tx_dev, &tx_priv, __func__))
-		return -EINVAL;
-
-	dev_dbg(tx_dev, "%s: event = %d\n", __func__, event);
-	switch (event) {
-	case SND_SOC_DAPM_PRE_PMU:
-		ret = tx_macro_mclk_enable(tx_priv, 1);
-		if (ret)
-			tx_priv->dapm_mclk_enable = false;
-		else
-			tx_priv->dapm_mclk_enable = true;
-		break;
-	case SND_SOC_DAPM_POST_PMD:
-		if (tx_priv->dapm_mclk_enable)
-			ret = tx_macro_mclk_enable(tx_priv, 0);
-		break;
-	default:
-		dev_err(tx_priv->dev,
-			"%s: invalid DAPM event %d\n", __func__, event);
-		ret = -EINVAL;
-	}
-	return ret;
-}
-
-static int tx_macro_event_handler(struct snd_soc_codec *codec, u16 event,
-				  u32 data)
-{
-	struct device *tx_dev = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
-	int ret = 0;
-
-	if (!tx_macro_get_data(codec, &tx_dev, &tx_priv, __func__))
-		return -EINVAL;
-
-	switch (event) {
-	case BOLERO_MACRO_EVT_SSR_DOWN:
-		if (tx_priv->swr_ctrl_data) {
-			swrm_wcd_notify(
-				tx_priv->swr_ctrl_data[0].tx_swr_pdev,
-				SWR_DEVICE_DOWN, NULL);
-			swrm_wcd_notify(
-				tx_priv->swr_ctrl_data[0].tx_swr_pdev,
-				SWR_DEVICE_SSR_DOWN, NULL);
-		}
-		if ((!pm_runtime_enabled(tx_dev) ||
-		     !pm_runtime_suspended(tx_dev))) {
-			ret = bolero_runtime_suspend(tx_dev);
-			if (!ret) {
-				pm_runtime_disable(tx_dev);
-				pm_runtime_set_suspended(tx_dev);
-				pm_runtime_enable(tx_dev);
-			}
-		}
-		break;
-	case BOLERO_MACRO_EVT_SSR_UP:
-		/* reset swr after ssr/pdr */
-		tx_priv->reset_swr = true;
-		if (tx_priv->swr_ctrl_data)
-			swrm_wcd_notify(
-				tx_priv->swr_ctrl_data[0].tx_swr_pdev,
-				SWR_DEVICE_SSR_UP, NULL);
-		break;
-	case BOLERO_MACRO_EVT_CLK_RESET:
-		bolero_rsc_clk_reset(tx_dev, TX_CORE_CLK);
-		break;
-	case BOLERO_MACRO_EVT_BCS_CLK_OFF:
-		if (tx_priv->bcs_clk_en)
-			snd_soc_update_bits(codec,
-				BOLERO_CDC_TX0_TX_PATH_SEC7, 0x40, data << 6);
-		if (data)
-			tx_priv->hs_slow_insert_complete = true;
-		else
-			tx_priv->hs_slow_insert_complete = false;
-		break;
-	}
-	return 0;
-}
-
-static int tx_macro_reg_wake_irq(struct snd_soc_codec *codec,
-				 u32 data)
-{
-	struct device *tx_dev = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
-	u32 ipc_wakeup = data;
-	int ret = 0;
-
-	if (!tx_macro_get_data(codec, &tx_dev, &tx_priv, __func__))
-		return -EINVAL;
-
-	if (tx_priv->swr_ctrl_data)
+	if (rx_priv->swr_ctrl_data)
 		ret = swrm_wcd_notify(
-			tx_priv->swr_ctrl_data[0].tx_swr_pdev,
-			SWR_REGISTER_WAKE_IRQ, &ipc_wakeup);
+			rx_priv->swr_ctrl_data[0].rx_swr_pdev,
+			SWR_SET_PORT_MAP, &port_cfg);
 
 	return ret;
 }
 
-static void tx_macro_tx_hpf_corner_freq_callback(struct work_struct *work)
-{
-	struct delayed_work *hpf_delayed_work = NULL;
-	struct hpf_work *hpf_work = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
-	struct snd_soc_codec *codec = NULL;
-	u16 dec_cfg_reg = 0, hpf_gate_reg = 0;
-	u8 hpf_cut_off_freq = 0;
-	u16 adc_mux_reg = 0, adc_n = 0, adc_reg = 0;
-
-	hpf_delayed_work = to_delayed_work(work);
-	hpf_work = container_of(hpf_delayed_work, struct hpf_work, dwork);
-	tx_priv = hpf_work->tx_priv;
-	codec = tx_priv->codec;
-	hpf_cut_off_freq = hpf_work->hpf_cut_off_freq;
-
-	dec_cfg_reg = BOLERO_CDC_TX0_TX_PATH_CFG0 +
-			TX_MACRO_TX_PATH_OFFSET * hpf_work->decimator;
-	hpf_gate_reg = BOLERO_CDC_TX0_TX_PATH_SEC2 +
-			TX_MACRO_TX_PATH_OFFSET * hpf_work->decimator;
-
-	dev_dbg(codec->dev, "%s: decimator %u hpf_cut_of_freq 0x%x\n",
-		__func__, hpf_work->decimator, hpf_cut_off_freq);
-
-	adc_mux_reg = BOLERO_CDC_TX_INP_MUX_ADC_MUX0_CFG1 +
-			TX_MACRO_ADC_MUX_CFG_OFFSET * hpf_work->decimator;
-	if (snd_soc_read(codec, adc_mux_reg) & SWR_MIC) {
-		adc_reg = BOLERO_CDC_TX_INP_MUX_ADC_MUX0_CFG0 +
-			TX_MACRO_ADC_MUX_CFG_OFFSET * hpf_work->decimator;
-		adc_n = snd_soc_read(codec, adc_reg) &
-				TX_MACRO_SWR_MIC_MUX_SEL_MASK;
-		if (adc_n >= BOLERO_ADC_MAX)
-			goto tx_hpf_set;
-		/* analog mic clear TX hold */
-		bolero_clear_amic_tx_hold(codec->dev, adc_n);
-	}
-tx_hpf_set:
-	snd_soc_update_bits(codec, dec_cfg_reg, TX_HPF_CUT_OFF_FREQ_MASK,
-			    hpf_cut_off_freq << 5);
-	snd_soc_update_bits(codec, hpf_gate_reg, 0x03, 0x02);
-	/* Minimum 1 clk cycle delay is required as per HW spec */
-	usleep_range(1000, 1010);
-	snd_soc_update_bits(codec, hpf_gate_reg, 0x03, 0x01);
-}
-
-static void tx_macro_mute_update_callback(struct work_struct *work)
-{
-	struct tx_mute_work *tx_mute_dwork = NULL;
-	struct snd_soc_codec *codec = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
-	struct delayed_work *delayed_work = NULL;
-	u16 tx_vol_ctl_reg = 0;
-	u8 decimator = 0;
-
-	delayed_work = to_delayed_work(work);
-	tx_mute_dwork = container_of(delayed_work, struct tx_mute_work, dwork);
-	tx_priv = tx_mute_dwork->tx_priv;
-	codec = tx_priv->codec;
-	decimator = tx_mute_dwork->decimator;
-
-	tx_vol_ctl_reg =
-		BOLERO_CDC_TX0_TX_PATH_CTL +
-			TX_MACRO_TX_PATH_OFFSET * decimator;
-	snd_soc_update_bits(codec, tx_vol_ctl_reg, 0x10, 0x00);
-	dev_dbg(tx_priv->dev, "%s: decimator %u unmute\n",
-		__func__, decimator);
-}
-
-static int tx_macro_put_dec_enum(struct snd_kcontrol *kcontrol,
-			      struct snd_ctl_elem_value *ucontrol)
+static int rx_macro_int_dem_inp_mux_put(struct snd_kcontrol *kcontrol,
+				     struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_dapm_widget *widget =
 		snd_soc_dapm_kcontrol_widget(kcontrol);
 	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(widget->dapm);
 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
 	unsigned int val = 0;
-	u16 mic_sel_reg = 0;
-	u16 dmic_clk_reg = 0;
-	struct device *tx_dev = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
-
-	if (!tx_macro_get_data(codec, &tx_dev, &tx_priv, __func__))
-		return -EINVAL;
+	unsigned short look_ahead_dly_reg =
+				BOLERO_CDC_RX_RX0_RX_PATH_CFG0;
 
 	val = ucontrol->value.enumerated.item[0];
-	if (val > e->items - 1)
+	if (val >= e->items)
 		return -EINVAL;
 
 	dev_dbg(codec->dev, "%s: wname: %s, val: 0x%x\n", __func__,
 		widget->name, val);
 
-	switch (e->reg) {
-	case BOLERO_CDC_TX_INP_MUX_ADC_MUX0_CFG0:
-		mic_sel_reg = BOLERO_CDC_TX0_TX_PATH_CFG0;
-		break;
-	case BOLERO_CDC_TX_INP_MUX_ADC_MUX1_CFG0:
-		mic_sel_reg = BOLERO_CDC_TX1_TX_PATH_CFG0;
-		break;
-	case BOLERO_CDC_TX_INP_MUX_ADC_MUX2_CFG0:
-		mic_sel_reg = BOLERO_CDC_TX2_TX_PATH_CFG0;
-		break;
-	case BOLERO_CDC_TX_INP_MUX_ADC_MUX3_CFG0:
-		mic_sel_reg = BOLERO_CDC_TX3_TX_PATH_CFG0;
-		break;
-	case BOLERO_CDC_TX_INP_MUX_ADC_MUX4_CFG0:
-		mic_sel_reg = BOLERO_CDC_TX4_TX_PATH_CFG0;
-		break;
-	case BOLERO_CDC_TX_INP_MUX_ADC_MUX5_CFG0:
-		mic_sel_reg = BOLERO_CDC_TX5_TX_PATH_CFG0;
-		break;
-	case BOLERO_CDC_TX_INP_MUX_ADC_MUX6_CFG0:
-		mic_sel_reg = BOLERO_CDC_TX6_TX_PATH_CFG0;
-		break;
-	case BOLERO_CDC_TX_INP_MUX_ADC_MUX7_CFG0:
-		mic_sel_reg = BOLERO_CDC_TX7_TX_PATH_CFG0;
-		break;
-	default:
-		dev_err(codec->dev, "%s: e->reg: 0x%x not expected\n",
-			__func__, e->reg);
-		return -EINVAL;
-	}
-	if (strnstr(widget->name, "SMIC", strlen(widget->name))) {
-		if (val != 0) {
-			if (val < 5) {
-				snd_soc_update_bits(codec, mic_sel_reg,
-							1 << 7, 0x0 << 7);
-			} else {
-				snd_soc_update_bits(codec,
-							mic_sel_reg,
-							1 << 7, 0x1 << 7);
-				snd_soc_update_bits(codec,
-					BOLERO_CDC_VA_TOP_CSR_DMIC_CFG,
-					0x80, 0x00);
-				dmic_clk_reg =
-					BOLERO_CDC_TX_TOP_CSR_SWR_DMIC0_CTL +
-						((val - 5)/2) * 4;
-				snd_soc_update_bits(codec,
-					dmic_clk_reg,
-					0x0E, tx_priv->dmic_clk_div << 0x1);
-			}
-		}
-	} else {
-		/* DMIC selected */
-		if (val != 0)
-			snd_soc_update_bits(codec, mic_sel_reg, 1 << 7, 1 << 7);
-	}
+	if (e->reg == BOLERO_CDC_RX_RX0_RX_PATH_CFG1)
+		look_ahead_dly_reg = BOLERO_CDC_RX_RX0_RX_PATH_CFG0;
+	else if (e->reg == BOLERO_CDC_RX_RX1_RX_PATH_CFG1)
+		look_ahead_dly_reg = BOLERO_CDC_RX_RX1_RX_PATH_CFG0;
 
+	/* Set Look Ahead Delay */
+	snd_soc_update_bits(codec, look_ahead_dly_reg,
+			    0x08, (val ? 0x08 : 0x00));
+	/* Set DEM INP Select */
 	return snd_soc_dapm_put_enum_double(kcontrol, ucontrol);
 }
 
-static int tx_macro_tx_mixer_get(struct snd_kcontrol *kcontrol,
-			     struct snd_ctl_elem_value *ucontrol)
+static int rx_macro_set_prim_interpolator_rate(struct snd_soc_dai *dai,
+					    u8 rate_reg_val,
+					    u32 sample_rate)
 {
-	struct snd_soc_dapm_widget *widget =
-		snd_soc_dapm_kcontrol_widget(kcontrol);
-	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(widget->dapm);
-	struct soc_multi_mixer_control *mixer =
-		((struct soc_multi_mixer_control *)kcontrol->private_value);
-	u32 dai_id = widget->shift;
-	u32 dec_id = mixer->shift;
-	struct device *tx_dev = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
+	u8 int_1_mix1_inp = 0;
+	u32 j = 0, port = 0;
+	u16 int_mux_cfg0 = 0, int_mux_cfg1 = 0;
+	u16 int_fs_reg = 0;
+	u8 int_mux_cfg0_val = 0, int_mux_cfg1_val = 0;
+	u8 inp0_sel = 0, inp1_sel = 0, inp2_sel = 0;
+	struct snd_soc_codec *codec = dai->codec;
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
 
-	if (!tx_macro_get_data(codec, &tx_dev, &tx_priv, __func__))
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
 		return -EINVAL;
 
-	if (test_bit(dec_id, &tx_priv->active_ch_mask[dai_id]))
-		ucontrol->value.integer.value[0] = 1;
-	else
-		ucontrol->value.integer.value[0] = 0;
+	for_each_set_bit(port, &rx_priv->active_ch_mask[dai->id],
+			 RX_MACRO_PORTS_MAX) {
+		int_1_mix1_inp = port;
+		if ((int_1_mix1_inp < RX_MACRO_RX0) ||
+			(int_1_mix1_inp > RX_MACRO_PORTS_MAX)) {
+			pr_err("%s: Invalid RX port, Dai ID is %d\n",
+				__func__, dai->id);
+			return -EINVAL;
+		}
+
+		int_mux_cfg0 = BOLERO_CDC_RX_INP_MUX_RX_INT0_CFG0;
+
+		/*
+		 * Loop through all interpolator MUX inputs and find out
+		 * to which interpolator input, the rx port
+		 * is connected
+		 */
+		for (j = 0; j < INTERP_MAX; j++) {
+			int_mux_cfg1 = int_mux_cfg0 + 4;
+
+			int_mux_cfg0_val = snd_soc_read(codec, int_mux_cfg0);
+			int_mux_cfg1_val = snd_soc_read(codec, int_mux_cfg1);
+			inp0_sel = int_mux_cfg0_val & 0x0F;
+			inp1_sel = (int_mux_cfg0_val >> 4) & 0x0F;
+			inp2_sel = (int_mux_cfg1_val >> 4) & 0x0F;
+			if ((inp0_sel == int_1_mix1_inp + INTn_1_INP_SEL_RX0) ||
+			    (inp1_sel == int_1_mix1_inp + INTn_1_INP_SEL_RX0) ||
+			    (inp2_sel == int_1_mix1_inp + INTn_1_INP_SEL_RX0)) {
+				int_fs_reg = BOLERO_CDC_RX_RX0_RX_PATH_CTL +
+					     0x80 * j;
+				pr_debug("%s: AIF_PB DAI(%d) connected to INT%u_1\n",
+					  __func__, dai->id, j);
+				pr_debug("%s: set INT%u_1 sample rate to %u\n",
+					__func__, j, sample_rate);
+				/* sample_rate is in Hz */
+				snd_soc_update_bits(codec, int_fs_reg,
+						0x0F, rate_reg_val);
+			}
+			int_mux_cfg0 += 8;
+		}
+	}
+
 	return 0;
 }
 
-static int tx_macro_tx_mixer_put(struct snd_kcontrol *kcontrol,
-			     struct snd_ctl_elem_value *ucontrol)
+static int rx_macro_set_mix_interpolator_rate(struct snd_soc_dai *dai,
+					u8 rate_reg_val,
+					u32 sample_rate)
 {
-	struct snd_soc_dapm_widget *widget =
-		snd_soc_dapm_kcontrol_widget(kcontrol);
-	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(widget->dapm);
-	struct snd_soc_dapm_update *update = NULL;
-	struct soc_multi_mixer_control *mixer =
-		((struct soc_multi_mixer_control *)kcontrol->private_value);
-	u32 dai_id = widget->shift;
-	u32 dec_id = mixer->shift;
-	u32 enable = ucontrol->value.integer.value[0];
-	struct device *tx_dev = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
+	u8 int_2_inp = 0;
+	u32 j = 0, port = 0;
+	u16 int_mux_cfg1 = 0, int_fs_reg = 0;
+	u8 int_mux_cfg1_val = 0;
+	struct snd_soc_codec *codec = dai->codec;
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
 
-	if (!tx_macro_get_data(codec, &tx_dev, &tx_priv, __func__))
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
 		return -EINVAL;
 
-	if (enable) {
-		set_bit(dec_id, &tx_priv->active_ch_mask[dai_id]);
-		tx_priv->active_ch_cnt[dai_id]++;
-	} else {
-		tx_priv->active_ch_cnt[dai_id]--;
-		clear_bit(dec_id, &tx_priv->active_ch_mask[dai_id]);
-	}
-	snd_soc_dapm_mixer_update_power(widget->dapm, kcontrol, enable, update);
+	for_each_set_bit(port, &rx_priv->active_ch_mask[dai->id],
+			 RX_MACRO_PORTS_MAX) {
+		int_2_inp = port;
+		if ((int_2_inp < RX_MACRO_RX0) ||
+			(int_2_inp > RX_MACRO_PORTS_MAX)) {
+			pr_err("%s: Invalid RX port, Dai ID is %d\n",
+				__func__, dai->id);
+			return -EINVAL;
+		}
 
+		int_mux_cfg1 = BOLERO_CDC_RX_INP_MUX_RX_INT0_CFG1;
+		for (j = 0; j < INTERP_MAX; j++) {
+			int_mux_cfg1_val = snd_soc_read(codec, int_mux_cfg1) &
+						0x0F;
+			if (int_mux_cfg1_val == int_2_inp +
+							INTn_2_INP_SEL_RX0) {
+				int_fs_reg = BOLERO_CDC_RX_RX0_RX_PATH_MIX_CTL +
+						0x80 * j;
+				pr_debug("%s: AIF_PB DAI(%d) connected to INT%u_2\n",
+					  __func__, dai->id, j);
+				pr_debug("%s: set INT%u_2 sample rate to %u\n",
+					__func__, j, sample_rate);
+				snd_soc_update_bits(codec, int_fs_reg,
+						0x0F, rate_reg_val);
+			}
+			int_mux_cfg1 += 8;
+		}
+	}
 	return 0;
 }
 
-static inline int tx_macro_path_get(const char *wname,
-				    unsigned int *path_num)
+static bool rx_macro_is_fractional_sample_rate(u32 sample_rate)
 {
-	int ret = 0;
-	char *widget_name = NULL;
-	char *w_name = NULL;
-	char *path_num_char = NULL;
-	char *path_name = NULL;
+	switch (sample_rate) {
+	case SAMPLING_RATE_44P1KHZ:
+	case SAMPLING_RATE_88P2KHZ:
+	case SAMPLING_RATE_176P4KHZ:
+	case SAMPLING_RATE_352P8KHZ:
+		return true;
+	default:
+		return false;
+	}
+	return false;
+}
 
-	widget_name = kstrndup(wname, 10, GFP_KERNEL);
-	if (!widget_name)
+static int rx_macro_set_interpolator_rate(struct snd_soc_dai *dai,
+					  u32 sample_rate)
+{
+	struct snd_soc_codec *codec = dai->codec;
+	int rate_val = 0;
+	int i = 0, ret = 0;
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
 		return -EINVAL;
 
-	w_name = widget_name;
 
-	path_name = strsep(&widget_name, " ");
-	if (!path_name) {
-		pr_err("%s: Invalid widget name = %s\n",
-			__func__, widget_name);
-		ret = -EINVAL;
-		goto err;
+	for (i = 0; i < ARRAY_SIZE(sr_val_tbl); i++) {
+		if (sample_rate == sr_val_tbl[i].sample_rate) {
+			rate_val = sr_val_tbl[i].rate_val;
+			if (rx_macro_is_fractional_sample_rate(sample_rate))
+				rx_priv->is_native_on = true;
+			else
+				rx_priv->is_native_on = false;
+			break;
+		}
 	}
-	path_num_char = strpbrk(path_name, "01234567");
-	if (!path_num_char) {
-		pr_err("%s: tx path index not found\n",
-			__func__);
-		ret = -EINVAL;
-		goto err;
+	if ((i == ARRAY_SIZE(sr_val_tbl)) || (rate_val < 0)) {
+		dev_err(codec->dev, "%s: Unsupported sample rate: %d\n",
+			__func__, sample_rate);
+		return -EINVAL;
 	}
-	ret = kstrtouint(path_num_char, 10, path_num);
-	if (ret < 0)
-		pr_err("%s: Invalid tx path = %s\n",
-			__func__, w_name);
 
-err:
-	kfree(w_name);
+	ret = rx_macro_set_prim_interpolator_rate(dai, (u8)rate_val, sample_rate);
+	if (ret)
+		return ret;
+	ret = rx_macro_set_mix_interpolator_rate(dai, (u8)rate_val, sample_rate);
+	if (ret)
+		return ret;
+
 	return ret;
 }
 
-static int tx_macro_dec_mode_get(struct snd_kcontrol *kcontrol,
-				 struct snd_ctl_elem_value *ucontrol)
+static int rx_macro_hw_params(struct snd_pcm_substream *substream,
+			       struct snd_pcm_hw_params *params,
+			       struct snd_soc_dai *dai)
 {
-	struct snd_soc_codec *codec =
-			snd_soc_kcontrol_codec(kcontrol);
-	struct tx_macro_priv *tx_priv = NULL;
-	struct device *tx_dev = NULL;
-	int ret = 0;
-	int path = 0;
-
-	if (!tx_macro_get_data(codec, &tx_dev, &tx_priv, __func__))
-		return -EINVAL;
-
-	ret = tx_macro_path_get(kcontrol->id.name, &path);
-	if (ret)
-		return ret;
-
-	ucontrol->value.integer.value[0] = tx_priv->dec_mode[path];
-
-	return 0;
-}
-
-static int tx_macro_dec_mode_put(struct snd_kcontrol *kcontrol,
-				 struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_codec *codec =
-			snd_soc_kcontrol_codec(kcontrol);
-	struct tx_macro_priv *tx_priv = NULL;
-	struct device *tx_dev = NULL;
-	int value = ucontrol->value.integer.value[0];
-	int ret = 0;
-	int path = 0;
-
-	if (!tx_macro_get_data(codec, &tx_dev, &tx_priv, __func__))
-		return -EINVAL;
-
-	ret = tx_macro_path_get(kcontrol->id.name, &path);
-	if (ret)
-		return ret;
-
-	tx_priv->dec_mode[path] = value;
-
-	return 0;
-}
-
-static int tx_macro_get_bcs(struct snd_kcontrol *kcontrol,
-                            struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_codec *codec =
-			snd_soc_kcontrol_codec(kcontrol);
-	struct tx_macro_priv *tx_priv = NULL;
-	struct device *tx_dev = NULL;
-
-	if (!tx_macro_get_data(codec, &tx_dev, &tx_priv, __func__))
-	return -EINVAL;
-
-	ucontrol->value.integer.value[0] = tx_priv->bcs_enable;
-
-	return 0;
-}
-
-static int tx_macro_set_bcs(struct snd_kcontrol *kcontrol,
-			    struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_codec *codec =
-			snd_soc_kcontrol_codec(kcontrol);
-	struct tx_macro_priv *tx_priv = NULL;
-	struct device *tx_dev = NULL;
-	int value = ucontrol->value.integer.value[0];
-
-	if (!tx_macro_get_data(codec, &tx_dev, &tx_priv, __func__))
-		return -EINVAL;
-
-	tx_priv->bcs_enable = value;
-
-	return 0;
-}
-
-static int tx_macro_enable_dmic(struct snd_soc_dapm_widget *w,
-		struct snd_kcontrol *kcontrol, int event)
-{
-	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
-	u8  dmic_clk_en = 0x01;
-	u16 dmic_clk_reg = 0;
-	s32 *dmic_clk_cnt = NULL;
-	unsigned int dmic = 0;
-	int ret = 0;
-	char *wname = NULL;
-	struct device *tx_dev = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
-
-	if (!tx_macro_get_data(codec, &tx_dev, &tx_priv, __func__))
-		return -EINVAL;
-
-	wname = strpbrk(w->name, "01234567");
-	if (!wname) {
-		dev_err(codec->dev, "%s: widget not found\n", __func__);
-		return -EINVAL;
-	}
-
-	ret = kstrtouint(wname, 10, &dmic);
-	if (ret < 0) {
-		dev_err(codec->dev, "%s: Invalid DMIC line on the codec\n",
-			__func__);
-		return -EINVAL;
-	}
-
-	switch (dmic) {
-	case 0:
-	case 1:
-		dmic_clk_cnt = &(tx_priv->dmic_0_1_clk_cnt);
-		dmic_clk_reg = BOLERO_CDC_VA_TOP_CSR_DMIC0_CTL;
-		break;
-	case 2:
-	case 3:
-		dmic_clk_cnt = &(tx_priv->dmic_2_3_clk_cnt);
-		dmic_clk_reg = BOLERO_CDC_VA_TOP_CSR_DMIC1_CTL;
-		break;
-	case 4:
-	case 5:
-		dmic_clk_cnt = &(tx_priv->dmic_4_5_clk_cnt);
-		dmic_clk_reg = BOLERO_CDC_VA_TOP_CSR_DMIC2_CTL;
-		break;
-	case 6:
-	case 7:
-		dmic_clk_cnt = &(tx_priv->dmic_6_7_clk_cnt);
-		dmic_clk_reg = BOLERO_CDC_VA_TOP_CSR_DMIC3_CTL;
-		break;
-	default:
-		dev_err(codec->dev, "%s: Invalid DMIC Selection\n",
-			__func__);
-		return -EINVAL;
-	}
-	dev_dbg(codec->dev, "%s: event %d DMIC%d dmic_clk_cnt %d\n",
-			__func__, event,  dmic, *dmic_clk_cnt);
-
-	switch (event) {
-	case SND_SOC_DAPM_PRE_PMU:
-		(*dmic_clk_cnt)++;
-		if (*dmic_clk_cnt == 1) {
-			snd_soc_update_bits(codec, BOLERO_CDC_VA_TOP_CSR_DMIC_CFG,
-					0x80, 0x00);
-
-			snd_soc_update_bits(codec, dmic_clk_reg,
-					0x0E, tx_priv->dmic_clk_div << 0x1);
-			snd_soc_update_bits(codec, dmic_clk_reg,
-					dmic_clk_en, dmic_clk_en);
-		}
-		break;
-	case SND_SOC_DAPM_POST_PMD:
-		(*dmic_clk_cnt)--;
-		if (*dmic_clk_cnt  == 0)
-			snd_soc_update_bits(codec, dmic_clk_reg,
-					dmic_clk_en, 0);
-		break;
-	}
-
-	return 0;
-}
-
-static int tx_macro_enable_dec(struct snd_soc_dapm_widget *w,
-			       struct snd_kcontrol *kcontrol, int event)
-{
-	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
-	unsigned int decimator = 0;
-	u16 tx_vol_ctl_reg = 0;
-	u16 dec_cfg_reg = 0;
-	u16 hpf_gate_reg = 0;
-	u16 tx_gain_ctl_reg = 0;
-	u8 hpf_cut_off_freq = 0;
-	struct device *tx_dev = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
-
-	if (!tx_macro_get_data(codec, &tx_dev, &tx_priv, __func__))
-		return -EINVAL;
-
-	decimator = w->shift;
-
-	dev_dbg(codec->dev, "%s(): widget = %s decimator = %u\n", __func__,
-			w->name, decimator);
-
-	tx_vol_ctl_reg = BOLERO_CDC_TX0_TX_PATH_CTL +
-				TX_MACRO_TX_PATH_OFFSET * decimator;
-	hpf_gate_reg = BOLERO_CDC_TX0_TX_PATH_SEC2 +
-				TX_MACRO_TX_PATH_OFFSET * decimator;
-	dec_cfg_reg = BOLERO_CDC_TX0_TX_PATH_CFG0 +
-				TX_MACRO_TX_PATH_OFFSET * decimator;
-	tx_gain_ctl_reg = BOLERO_CDC_TX0_TX_VOL_CTL +
-				TX_MACRO_TX_PATH_OFFSET * decimator;
-
-	switch (event) {
-	case SND_SOC_DAPM_PRE_PMU:
-		snd_soc_update_bits(codec,
-			dec_cfg_reg, 0x06, tx_priv->dec_mode[decimator] <<
-			TX_MACRO_ADC_MODE_CFG0_SHIFT);
-		/* Enable TX PGA Mute */
-		snd_soc_update_bits(codec, tx_vol_ctl_reg, 0x10, 0x10);
-		break;
-	case SND_SOC_DAPM_POST_PMU:
-		snd_soc_update_bits(codec, tx_vol_ctl_reg, 0x20, 0x20);
-		snd_soc_update_bits(codec, hpf_gate_reg, 0x01, 0x00);
-
-		hpf_cut_off_freq = (snd_soc_read(codec, dec_cfg_reg) &
-				   TX_HPF_CUT_OFF_FREQ_MASK) >> 5;
-		tx_priv->tx_hpf_work[decimator].hpf_cut_off_freq =
-						hpf_cut_off_freq;
-
-		if (hpf_cut_off_freq != CF_MIN_3DB_150HZ)
-			snd_soc_update_bits(codec, dec_cfg_reg,
-					    TX_HPF_CUT_OFF_FREQ_MASK,
-					    CF_MIN_3DB_150HZ << 5);
-
-		/* schedule work queue to Remove Mute */
-		schedule_delayed_work(&tx_priv->tx_mute_dwork[decimator].dwork,
-				      msecs_to_jiffies(tx_unmute_delay));
-		if (tx_priv->tx_hpf_work[decimator].hpf_cut_off_freq !=
-							CF_MIN_3DB_150HZ) {
-			schedule_delayed_work(
-					&tx_priv->tx_hpf_work[decimator].dwork,
-					msecs_to_jiffies(300));
-			snd_soc_update_bits(codec, hpf_gate_reg, 0x02, 0x02);
-			/*
-			 * Minimum 1 clk cycle delay is required as per HW spec
-			 */
-			usleep_range(1000, 1010);
-			snd_soc_update_bits(codec, hpf_gate_reg, 0x02, 0x00);
-		}
-		/* apply gain after decimator is enabled */
-		snd_soc_write(codec, tx_gain_ctl_reg,
-			      snd_soc_read(codec,
-					tx_gain_ctl_reg));
-		if (tx_priv->bcs_enable) {
-			snd_soc_update_bits(codec, dec_cfg_reg,
-					0x01, 0x01);
-			tx_priv->bcs_clk_en = true;
-			if (tx_priv->hs_slow_insert_complete)
-			snd_soc_update_bits(codec,
-				BOLERO_CDC_TX0_TX_PATH_SEC7, 0x40, 0x40);
-		}
-		break;
-	case SND_SOC_DAPM_PRE_PMD:
-		hpf_cut_off_freq =
-			tx_priv->tx_hpf_work[decimator].hpf_cut_off_freq;
-		snd_soc_update_bits(codec, tx_vol_ctl_reg, 0x10, 0x10);
-		if (cancel_delayed_work_sync(
-		    &tx_priv->tx_hpf_work[decimator].dwork)) {
-			if (hpf_cut_off_freq != CF_MIN_3DB_150HZ) {
-				snd_soc_update_bits(codec, dec_cfg_reg,
-						    TX_HPF_CUT_OFF_FREQ_MASK,
-						    hpf_cut_off_freq << 5);
-				snd_soc_update_bits(codec, hpf_gate_reg,
-						0x02, 0x02);
-				/*
-				 * Minimum 1 clk cycle delay is required
-				 * as per HW spec
-				 */
-				usleep_range(1000, 1010);
-				snd_soc_update_bits(codec, hpf_gate_reg,
-						0x02, 0x00);
-			}
-		}
-		cancel_delayed_work_sync(
-				&tx_priv->tx_mute_dwork[decimator].dwork);
-		break;
-	case SND_SOC_DAPM_POST_PMD:
-		snd_soc_update_bits(codec, tx_vol_ctl_reg, 0x20, 0x00);
-		snd_soc_update_bits(codec,
-			dec_cfg_reg, 0x06, 0x00);
-		snd_soc_update_bits(codec, tx_vol_ctl_reg, 0x10, 0x00);
-		if (tx_priv->bcs_enable) {
-			snd_soc_update_bits(codec, dec_cfg_reg,
-					0x01, 0x00);
-			snd_soc_update_bits(codec,
-				BOLERO_CDC_TX0_TX_PATH_SEC7, 0x40, 0x00);
-			tx_priv->bcs_clk_en = false;
-		}
-		break;
-	}
-	return 0;
-}
-
-static int tx_macro_enable_micbias(struct snd_soc_dapm_widget *w,
-			struct snd_kcontrol *kcontrol, int event)
-{
-	return 0;
-}
-
-static int tx_macro_hw_params(struct snd_pcm_substream *substream,
-			   struct snd_pcm_hw_params *params,
-			   struct snd_soc_dai *dai)
-{
-	int tx_fs_rate = -EINVAL;
 	struct snd_soc_codec *codec = dai->codec;
-	u32 decimator = 0;
-	u32 sample_rate = 0;
-	u16 tx_fs_reg = 0;
-	struct device *tx_dev = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
+	int ret = 0;
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
 
-	if (!tx_macro_get_data(codec, &tx_dev, &tx_priv, __func__))
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
 		return -EINVAL;
 
-	pr_debug("%s: dai_name = %s DAI-ID %x rate %d num_ch %d\n", __func__,
+	dev_dbg(codec->dev,
+		"%s: dai_name = %s DAI-ID %x rate %d num_ch %d\n", __func__,
 		 dai->name, dai->id, params_rate(params),
 		 params_channels(params));
 
-	sample_rate = params_rate(params);
-	switch (sample_rate) {
-	case 8000:
-		tx_fs_rate = 0;
-		break;
-	case 16000:
-		tx_fs_rate = 1;
-		break;
-	case 32000:
-		tx_fs_rate = 3;
-		break;
-	case 48000:
-		tx_fs_rate = 4;
-		break;
-	case 96000:
-		tx_fs_rate = 5;
-		break;
-	case 192000:
-		tx_fs_rate = 6;
-		break;
-	case 384000:
-		tx_fs_rate = 7;
-		break;
-	default:
-		dev_err(codec->dev, "%s: Invalid TX sample rate: %d\n",
-			__func__, params_rate(params));
-		return -EINVAL;
-	}
-	for_each_set_bit(decimator, &tx_priv->active_ch_mask[dai->id],
-			 TX_MACRO_DEC_MAX) {
-		if (decimator >= 0) {
-			tx_fs_reg = BOLERO_CDC_TX0_TX_PATH_CTL +
-				    TX_MACRO_TX_PATH_OFFSET * decimator;
-			dev_dbg(codec->dev, "%s: set DEC%u rate to %u\n",
-				__func__, decimator, sample_rate);
-			snd_soc_update_bits(codec, tx_fs_reg, 0x0F,
-					    tx_fs_rate);
-		} else {
-			dev_err(codec->dev,
-				"%s: ERROR: Invalid decimator: %d\n",
-				__func__, decimator);
-			return -EINVAL;
+	switch (substream->stream) {
+	case SNDRV_PCM_STREAM_PLAYBACK:
+		ret = rx_macro_set_interpolator_rate(dai, params_rate(params));
+		if (ret) {
+			pr_err("%s: cannot set sample rate: %u\n",
+				__func__, params_rate(params));
+			return ret;
 		}
+		rx_priv->bit_width[dai->id] = params_width(params);
+		break;
+	case SNDRV_PCM_STREAM_CAPTURE:
+	default:
+		break;
 	}
 	return 0;
 }
 
-static int tx_macro_get_channel_map(struct snd_soc_dai *dai,
+static int rx_macro_get_channel_map(struct snd_soc_dai *dai,
 				unsigned int *tx_num, unsigned int *tx_slot,
 				unsigned int *rx_num, unsigned int *rx_slot)
 {
 	struct snd_soc_codec *codec = dai->codec;
-	struct device *tx_dev = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+	unsigned int temp = 0, ch_mask = 0;
+	u16 val = 0, mask = 0, cnt = 0, i = 0;
 
-	if (!tx_macro_get_data(codec, &tx_dev, &tx_priv, __func__))
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
 		return -EINVAL;
 
 	switch (dai->id) {
-	case TX_MACRO_AIF1_CAP:
-	case TX_MACRO_AIF2_CAP:
-	case TX_MACRO_AIF3_CAP:
-		*tx_slot = tx_priv->active_ch_mask[dai->id];
-		*tx_num = tx_priv->active_ch_cnt[dai->id];
+	case RX_MACRO_AIF1_PB:
+	case RX_MACRO_AIF2_PB:
+	case RX_MACRO_AIF3_PB:
+	case RX_MACRO_AIF4_PB:
+		for_each_set_bit(temp, &rx_priv->active_ch_mask[dai->id],
+			 RX_MACRO_PORTS_MAX) {
+			ch_mask |= (1 << temp);
+			if (++i == RX_MACRO_MAX_DMA_CH_PER_PORT)
+				break;
+		}
+		/*
+		 * CDC_DMA_RX_0 port drives RX0/RX1 -- ch_mask 0x1/0x2/0x3
+		 * CDC_DMA_RX_1 port drives RX2/RX3 -- ch_mask 0x1/0x2/0x3
+		 * CDC_DMA_RX_2 port drives RX4     -- ch_mask 0x1
+		 * CDC_DMA_RX_3 port drives RX5     -- ch_mask 0x1
+		 * AIFn can pair to any CDC_DMA_RX_n port.
+		 * In general, below convention is used::
+		 * CDC_DMA_RX_0(AIF1)/CDC_DMA_RX_1(AIF2)/
+		 * CDC_DMA_RX_2(AIF3)/CDC_DMA_RX_3(AIF4)
+		 * Above is reflected in machine driver BE dailink
+		 */
+		if (ch_mask & 0x0C)
+			ch_mask = ch_mask >> 2;
+		if ((ch_mask & 0x10) || (ch_mask & 0x20))
+			ch_mask = 0x1;
+		*rx_slot = ch_mask;
+		*rx_num = rx_priv->active_ch_cnt[dai->id];
+		dev_dbg(rx_priv->dev,
+			"%s: dai->id:%d, ch_mask:0x%x, active_ch_cnt:%d active_mask: 0x%x\n",
+			__func__, dai->id, *rx_slot, *rx_num, rx_priv->active_ch_mask[dai->id]);
+		break;
+	case RX_MACRO_AIF_ECHO:
+		val = snd_soc_read(codec,
+			BOLERO_CDC_RX_INP_MUX_RX_MIX_CFG4);
+		if (val & RX_MACRO_EC_MIX_TX0_MASK) {
+			mask |= 0x1;
+			cnt++;
+		}
+		if (val & RX_MACRO_EC_MIX_TX1_MASK) {
+			mask |= 0x2;
+			cnt++;
+		}
+		val = snd_soc_read(codec,
+			BOLERO_CDC_RX_INP_MUX_RX_MIX_CFG5);
+		if (val & RX_MACRO_EC_MIX_TX2_MASK) {
+			mask |= 0x4;
+			cnt++;
+		}
+		*tx_slot = mask;
+		*tx_num = cnt;
 		break;
 	default:
-		dev_err(tx_dev, "%s: Invalid AIF\n", __func__);
+		dev_err(rx_dev, "%s: Invalid AIF\n", __func__);
 		break;
 	}
 	return 0;
 }
 
-static struct snd_soc_dai_ops tx_macro_dai_ops = {
-	.hw_params = tx_macro_hw_params,
-	.get_channel_map = tx_macro_get_channel_map,
-};
-
-static struct snd_soc_dai_driver tx_macro_dai[] = {
-	{
-		.name = "tx_macro_tx1",
-		.id = TX_MACRO_AIF1_CAP,
-		.capture = {
-			.stream_name = "TX_AIF1 Capture",
-			.rates = TX_MACRO_RATES,
-			.formats = TX_MACRO_FORMATS,
-			.rate_max = 192000,
-			.rate_min = 8000,
-			.channels_min = 1,
-			.channels_max = 8,
-		},
-		.ops = &tx_macro_dai_ops,
-	},
-	{
-		.name = "tx_macro_tx2",
-		.id = TX_MACRO_AIF2_CAP,
-		.capture = {
-			.stream_name = "TX_AIF2 Capture",
-			.rates = TX_MACRO_RATES,
-			.formats = TX_MACRO_FORMATS,
-			.rate_max = 192000,
-			.rate_min = 8000,
-			.channels_min = 1,
-			.channels_max = 8,
-		},
-		.ops = &tx_macro_dai_ops,
-	},
-	{
-		.name = "tx_macro_tx3",
-		.id = TX_MACRO_AIF3_CAP,
-		.capture = {
-			.stream_name = "TX_AIF3 Capture",
-			.rates = TX_MACRO_RATES,
-			.formats = TX_MACRO_FORMATS,
-			.rate_max = 192000,
-			.rate_min = 8000,
-			.channels_min = 1,
-			.channels_max = 8,
-		},
-		.ops = &tx_macro_dai_ops,
-	},
-};
-
-#define STRING(name) #name
-#define TX_MACRO_DAPM_ENUM(name, reg, offset, text) \
-static SOC_ENUM_SINGLE_DECL(name##_enum, reg, offset, text); \
-static const struct snd_kcontrol_new name##_mux = \
-		SOC_DAPM_ENUM(STRING(name), name##_enum)
-
-#define TX_MACRO_DAPM_ENUM_EXT(name, reg, offset, text, getname, putname) \
-static SOC_ENUM_SINGLE_DECL(name##_enum, reg, offset, text); \
-static const struct snd_kcontrol_new name##_mux = \
-		SOC_DAPM_ENUM_EXT(STRING(name), name##_enum, getname, putname)
-
-#define TX_MACRO_DAPM_MUX(name, shift, kctl) \
-		SND_SOC_DAPM_MUX(name, SND_SOC_NOPM, shift, 0, &kctl##_mux)
-
-static const char * const adc_mux_text[] = {
-	"MSM_DMIC", "SWR_MIC", "ANC_FB_TUNE1"
-};
-
-TX_MACRO_DAPM_ENUM(tx_dec0, BOLERO_CDC_TX_INP_MUX_ADC_MUX0_CFG1,
-		   0, adc_mux_text);
-TX_MACRO_DAPM_ENUM(tx_dec1, BOLERO_CDC_TX_INP_MUX_ADC_MUX1_CFG1,
-		   0, adc_mux_text);
-TX_MACRO_DAPM_ENUM(tx_dec2, BOLERO_CDC_TX_INP_MUX_ADC_MUX2_CFG1,
-		   0, adc_mux_text);
-TX_MACRO_DAPM_ENUM(tx_dec3, BOLERO_CDC_TX_INP_MUX_ADC_MUX3_CFG1,
-		   0, adc_mux_text);
-TX_MACRO_DAPM_ENUM(tx_dec4, BOLERO_CDC_TX_INP_MUX_ADC_MUX4_CFG1,
-		   0, adc_mux_text);
-TX_MACRO_DAPM_ENUM(tx_dec5, BOLERO_CDC_TX_INP_MUX_ADC_MUX5_CFG1,
-		   0, adc_mux_text);
-TX_MACRO_DAPM_ENUM(tx_dec6, BOLERO_CDC_TX_INP_MUX_ADC_MUX6_CFG1,
-		   0, adc_mux_text);
-TX_MACRO_DAPM_ENUM(tx_dec7, BOLERO_CDC_TX_INP_MUX_ADC_MUX7_CFG1,
-		   0, adc_mux_text);
-
-
-static const char * const dmic_mux_text[] = {
-	"ZERO", "DMIC0", "DMIC1", "DMIC2", "DMIC3",
-	"DMIC4", "DMIC5", "DMIC6", "DMIC7"
-};
-
-TX_MACRO_DAPM_ENUM_EXT(tx_dmic0, BOLERO_CDC_TX_INP_MUX_ADC_MUX0_CFG0,
-			4, dmic_mux_text, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_dmic1, BOLERO_CDC_TX_INP_MUX_ADC_MUX1_CFG0,
-			4, dmic_mux_text, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_dmic2, BOLERO_CDC_TX_INP_MUX_ADC_MUX2_CFG0,
-			4, dmic_mux_text, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_dmic3, BOLERO_CDC_TX_INP_MUX_ADC_MUX3_CFG0,
-			4, dmic_mux_text, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_dmic4, BOLERO_CDC_TX_INP_MUX_ADC_MUX4_CFG0,
-			4, dmic_mux_text, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_dmic5, BOLERO_CDC_TX_INP_MUX_ADC_MUX5_CFG0,
-			4, dmic_mux_text, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_dmic6, BOLERO_CDC_TX_INP_MUX_ADC_MUX6_CFG0,
-			4, dmic_mux_text, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_dmic7, BOLERO_CDC_TX_INP_MUX_ADC_MUX7_CFG0,
-			4, dmic_mux_text, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-static const char * const smic_mux_text[] = {
-	"ZERO", "ADC0", "ADC1", "ADC2", "ADC3", "SWR_DMIC0",
-	"SWR_DMIC1", "SWR_DMIC2", "SWR_DMIC3", "SWR_DMIC4",
-	"SWR_DMIC5", "SWR_DMIC6", "SWR_DMIC7"
-};
-
-TX_MACRO_DAPM_ENUM_EXT(tx_smic0, BOLERO_CDC_TX_INP_MUX_ADC_MUX0_CFG0,
-			0, smic_mux_text, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_smic1, BOLERO_CDC_TX_INP_MUX_ADC_MUX1_CFG0,
-			0, smic_mux_text, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_smic2, BOLERO_CDC_TX_INP_MUX_ADC_MUX2_CFG0,
-			0, smic_mux_text, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_smic3, BOLERO_CDC_TX_INP_MUX_ADC_MUX3_CFG0,
-			0, smic_mux_text, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_smic4, BOLERO_CDC_TX_INP_MUX_ADC_MUX4_CFG0,
-			0, smic_mux_text, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_smic5, BOLERO_CDC_TX_INP_MUX_ADC_MUX5_CFG0,
-			0, smic_mux_text, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_smic6, BOLERO_CDC_TX_INP_MUX_ADC_MUX6_CFG0,
-			0, smic_mux_text, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_smic7, BOLERO_CDC_TX_INP_MUX_ADC_MUX7_CFG0,
-			0, smic_mux_text, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-static const char * const smic_mux_text_v2[] = {
-	"ZERO", "SWR_MIC0", "SWR_MIC1", "SWR_MIC2", "SWR_MIC3",
-	"SWR_MIC4", "SWR_MIC5", "SWR_MIC6", "SWR_MIC7",
-	"SWR_MIC8", "SWR_MIC9", "SWR_MIC10", "SWR_MIC11"
-};
-
-TX_MACRO_DAPM_ENUM_EXT(tx_smic0_v2, BOLERO_CDC_TX_INP_MUX_ADC_MUX0_CFG0,
-			0, smic_mux_text_v2, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_smic1_v2, BOLERO_CDC_TX_INP_MUX_ADC_MUX1_CFG0,
-			0, smic_mux_text_v2, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_smic2_v2, BOLERO_CDC_TX_INP_MUX_ADC_MUX2_CFG0,
-			0, smic_mux_text_v2, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_smic3_v2, BOLERO_CDC_TX_INP_MUX_ADC_MUX3_CFG0,
-			0, smic_mux_text_v2, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_smic4_v3, BOLERO_CDC_TX_INP_MUX_ADC_MUX4_CFG0,
-			0, smic_mux_text_v2, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_smic5_v3, BOLERO_CDC_TX_INP_MUX_ADC_MUX5_CFG0,
-			0, smic_mux_text_v2, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_smic6_v3, BOLERO_CDC_TX_INP_MUX_ADC_MUX6_CFG0,
-			0, smic_mux_text_v2, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-TX_MACRO_DAPM_ENUM_EXT(tx_smic7_v3, BOLERO_CDC_TX_INP_MUX_ADC_MUX7_CFG0,
-			0, smic_mux_text_v2, snd_soc_dapm_get_enum_double,
-			tx_macro_put_dec_enum);
-
-static const char * const dec_mode_mux_text[] = {
-	"ADC_DEFAULT", "ADC_LOW_PWR", "ADC_HIGH_PERF",
-};
-
-static const struct soc_enum dec_mode_mux_enum =
-	SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(dec_mode_mux_text),
-			    dec_mode_mux_text);
-
-static const struct snd_kcontrol_new tx_aif1_cap_mixer[] = {
-	SOC_SINGLE_EXT("DEC0", SND_SOC_NOPM, TX_MACRO_DEC0, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC1", SND_SOC_NOPM, TX_MACRO_DEC1, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC2", SND_SOC_NOPM, TX_MACRO_DEC2, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC3", SND_SOC_NOPM, TX_MACRO_DEC3, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC4", SND_SOC_NOPM, TX_MACRO_DEC4, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC5", SND_SOC_NOPM, TX_MACRO_DEC5, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC6", SND_SOC_NOPM, TX_MACRO_DEC6, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC7", SND_SOC_NOPM, TX_MACRO_DEC7, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-};
-
-static const struct snd_kcontrol_new tx_aif2_cap_mixer[] = {
-	SOC_SINGLE_EXT("DEC0", SND_SOC_NOPM, TX_MACRO_DEC0, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC1", SND_SOC_NOPM, TX_MACRO_DEC1, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC2", SND_SOC_NOPM, TX_MACRO_DEC2, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC3", SND_SOC_NOPM, TX_MACRO_DEC3, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC4", SND_SOC_NOPM, TX_MACRO_DEC4, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC5", SND_SOC_NOPM, TX_MACRO_DEC5, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC6", SND_SOC_NOPM, TX_MACRO_DEC6, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC7", SND_SOC_NOPM, TX_MACRO_DEC7, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-};
-
-static const struct snd_kcontrol_new tx_aif3_cap_mixer[] = {
-	SOC_SINGLE_EXT("DEC0", SND_SOC_NOPM, TX_MACRO_DEC0, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC1", SND_SOC_NOPM, TX_MACRO_DEC1, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC2", SND_SOC_NOPM, TX_MACRO_DEC2, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC3", SND_SOC_NOPM, TX_MACRO_DEC3, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC4", SND_SOC_NOPM, TX_MACRO_DEC4, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC5", SND_SOC_NOPM, TX_MACRO_DEC5, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC6", SND_SOC_NOPM, TX_MACRO_DEC6, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC7", SND_SOC_NOPM, TX_MACRO_DEC7, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-};
-
-static const struct snd_kcontrol_new tx_aif1_cap_mixer_v2[] = {
-	SOC_SINGLE_EXT("DEC0", SND_SOC_NOPM, TX_MACRO_DEC0, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC1", SND_SOC_NOPM, TX_MACRO_DEC1, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC2", SND_SOC_NOPM, TX_MACRO_DEC2, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC3", SND_SOC_NOPM, TX_MACRO_DEC3, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-};
-
-static const struct snd_kcontrol_new tx_aif2_cap_mixer_v2[] = {
-	SOC_SINGLE_EXT("DEC0", SND_SOC_NOPM, TX_MACRO_DEC0, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC1", SND_SOC_NOPM, TX_MACRO_DEC1, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC2", SND_SOC_NOPM, TX_MACRO_DEC2, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC3", SND_SOC_NOPM, TX_MACRO_DEC3, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-};
-
-static const struct snd_kcontrol_new tx_aif3_cap_mixer_v2[] = {
-	SOC_SINGLE_EXT("DEC0", SND_SOC_NOPM, TX_MACRO_DEC0, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC1", SND_SOC_NOPM, TX_MACRO_DEC1, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC2", SND_SOC_NOPM, TX_MACRO_DEC2, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-	SOC_SINGLE_EXT("DEC3", SND_SOC_NOPM, TX_MACRO_DEC3, 1, 0,
-			tx_macro_tx_mixer_get, tx_macro_tx_mixer_put),
-};
-
-static const struct snd_soc_dapm_widget tx_macro_dapm_widgets_common[] = {
-	SND_SOC_DAPM_AIF_OUT("TX_AIF1 CAP", "TX_AIF1 Capture", 0,
-		SND_SOC_NOPM, TX_MACRO_AIF1_CAP, 0),
-
-	SND_SOC_DAPM_AIF_OUT("TX_AIF2 CAP", "TX_AIF2 Capture", 0,
-		SND_SOC_NOPM, TX_MACRO_AIF2_CAP, 0),
-
-	SND_SOC_DAPM_AIF_OUT("TX_AIF3 CAP", "TX_AIF3 Capture", 0,
-		SND_SOC_NOPM, TX_MACRO_AIF3_CAP, 0),
-
-	TX_MACRO_DAPM_MUX("TX DMIC MUX0", 0, tx_dmic0),
-	TX_MACRO_DAPM_MUX("TX DMIC MUX1", 0, tx_dmic1),
-	TX_MACRO_DAPM_MUX("TX DMIC MUX2", 0, tx_dmic2),
-	TX_MACRO_DAPM_MUX("TX DMIC MUX3", 0, tx_dmic3),
-
-	TX_MACRO_DAPM_MUX("TX SMIC MUX0", 0, tx_smic0_v2),
-	TX_MACRO_DAPM_MUX("TX SMIC MUX1", 0, tx_smic1_v2),
-	TX_MACRO_DAPM_MUX("TX SMIC MUX2", 0, tx_smic2_v2),
-	TX_MACRO_DAPM_MUX("TX SMIC MUX3", 0, tx_smic3_v2),
-
-	SND_SOC_DAPM_MICBIAS_E("TX MIC BIAS1", SND_SOC_NOPM, 0, 0,
-			       tx_macro_enable_micbias,
-			       SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
-	SND_SOC_DAPM_ADC_E("TX DMIC0", NULL, SND_SOC_NOPM, 0, 0,
-		tx_macro_enable_dmic, SND_SOC_DAPM_PRE_PMU |
-		SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_ADC_E("TX DMIC1", NULL, SND_SOC_NOPM, 0, 0,
-		tx_macro_enable_dmic, SND_SOC_DAPM_PRE_PMU |
-		SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_ADC_E("TX DMIC2", NULL, SND_SOC_NOPM, 0, 0,
-		tx_macro_enable_dmic, SND_SOC_DAPM_PRE_PMU |
-		SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_ADC_E("TX DMIC3", NULL, SND_SOC_NOPM, 0, 0,
-		tx_macro_enable_dmic, SND_SOC_DAPM_PRE_PMU |
-		SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_ADC_E("TX DMIC4", NULL, SND_SOC_NOPM, 0, 0,
-		tx_macro_enable_dmic, SND_SOC_DAPM_PRE_PMU |
-		SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_ADC_E("TX DMIC5", NULL, SND_SOC_NOPM, 0, 0,
-		tx_macro_enable_dmic, SND_SOC_DAPM_PRE_PMU |
-		SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_ADC_E("TX DMIC6", NULL, SND_SOC_NOPM, 0, 0,
-		tx_macro_enable_dmic, SND_SOC_DAPM_PRE_PMU |
-		SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_ADC_E("TX DMIC7", NULL, SND_SOC_NOPM, 0, 0,
-		tx_macro_enable_dmic, SND_SOC_DAPM_PRE_PMU |
-		SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_INPUT("TX SWR_MIC0"),
-	SND_SOC_DAPM_INPUT("TX SWR_MIC1"),
-	SND_SOC_DAPM_INPUT("TX SWR_MIC2"),
-	SND_SOC_DAPM_INPUT("TX SWR_MIC3"),
-	SND_SOC_DAPM_INPUT("TX SWR_MIC4"),
-	SND_SOC_DAPM_INPUT("TX SWR_MIC5"),
-	SND_SOC_DAPM_INPUT("TX SWR_MIC6"),
-	SND_SOC_DAPM_INPUT("TX SWR_MIC7"),
-	SND_SOC_DAPM_INPUT("TX SWR_MIC8"),
-	SND_SOC_DAPM_INPUT("TX SWR_MIC9"),
-	SND_SOC_DAPM_INPUT("TX SWR_MIC10"),
-	SND_SOC_DAPM_INPUT("TX SWR_MIC11"),
-
-	SND_SOC_DAPM_MUX_E("TX DEC0 MUX", SND_SOC_NOPM,
-			   TX_MACRO_DEC0, 0,
-			   &tx_dec0_mux, tx_macro_enable_dec,
-			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
-			   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_MUX_E("TX DEC1 MUX", SND_SOC_NOPM,
-			   TX_MACRO_DEC1, 0,
-			   &tx_dec1_mux, tx_macro_enable_dec,
-			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
-			   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_MUX_E("TX DEC2 MUX", SND_SOC_NOPM,
-			   TX_MACRO_DEC2, 0,
-			   &tx_dec2_mux, tx_macro_enable_dec,
-			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
-			   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_MUX_E("TX DEC3 MUX", SND_SOC_NOPM,
-			   TX_MACRO_DEC3, 0,
-			   &tx_dec3_mux, tx_macro_enable_dec,
-			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
-			   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_SUPPLY_S("TX_MCLK", 0, SND_SOC_NOPM, 0, 0,
-	tx_macro_mclk_event, SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
-};
-
-static const struct snd_soc_dapm_widget tx_macro_dapm_widgets_v2[] = {
-	SND_SOC_DAPM_MIXER("TX_AIF1_CAP Mixer", SND_SOC_NOPM,
-		TX_MACRO_AIF1_CAP, 0,
-		tx_aif1_cap_mixer_v2, ARRAY_SIZE(tx_aif1_cap_mixer_v2)),
-
-	SND_SOC_DAPM_MIXER("TX_AIF2_CAP Mixer", SND_SOC_NOPM,
-		TX_MACRO_AIF2_CAP, 0,
-		tx_aif2_cap_mixer_v2, ARRAY_SIZE(tx_aif2_cap_mixer_v2)),
-
-	SND_SOC_DAPM_MIXER("TX_AIF3_CAP Mixer", SND_SOC_NOPM,
-		TX_MACRO_AIF3_CAP, 0,
-		tx_aif3_cap_mixer_v2, ARRAY_SIZE(tx_aif3_cap_mixer_v2)),
-
-	SND_SOC_DAPM_SUPPLY_S("TX_SWR_CLK", 0, SND_SOC_NOPM, 0, 0,
-			tx_macro_tx_swr_clk_event,
-			SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
-};
-
-static const struct snd_soc_dapm_widget tx_macro_dapm_widgets_v3[] = {
-	SND_SOC_DAPM_MIXER("TX_AIF1_CAP Mixer", SND_SOC_NOPM,
-		TX_MACRO_AIF1_CAP, 0,
-		tx_aif1_cap_mixer, ARRAY_SIZE(tx_aif1_cap_mixer)),
-
-	SND_SOC_DAPM_MIXER("TX_AIF2_CAP Mixer", SND_SOC_NOPM,
-		TX_MACRO_AIF2_CAP, 0,
-		tx_aif2_cap_mixer, ARRAY_SIZE(tx_aif2_cap_mixer)),
-
-	SND_SOC_DAPM_MIXER("TX_AIF3_CAP Mixer", SND_SOC_NOPM,
-		TX_MACRO_AIF3_CAP, 0,
-		tx_aif3_cap_mixer, ARRAY_SIZE(tx_aif3_cap_mixer)),
-
-	TX_MACRO_DAPM_MUX("TX DMIC MUX4", 0, tx_dmic4),
-	TX_MACRO_DAPM_MUX("TX DMIC MUX5", 0, tx_dmic5),
-	TX_MACRO_DAPM_MUX("TX DMIC MUX6", 0, tx_dmic6),
-	TX_MACRO_DAPM_MUX("TX DMIC MUX7", 0, tx_dmic7),
-
-	TX_MACRO_DAPM_MUX("TX SMIC MUX4", 0, tx_smic4_v3),
-	TX_MACRO_DAPM_MUX("TX SMIC MUX5", 0, tx_smic5_v3),
-	TX_MACRO_DAPM_MUX("TX SMIC MUX6", 0, tx_smic6_v3),
-	TX_MACRO_DAPM_MUX("TX SMIC MUX7", 0, tx_smic7_v3),
-
-	SND_SOC_DAPM_MUX_E("TX DEC4 MUX", SND_SOC_NOPM,
-			   TX_MACRO_DEC4, 0,
-			   &tx_dec4_mux, tx_macro_enable_dec,
-			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
-			   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_MUX_E("TX DEC5 MUX", SND_SOC_NOPM,
-			   TX_MACRO_DEC5, 0,
-			   &tx_dec5_mux, tx_macro_enable_dec,
-			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
-			   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_MUX_E("TX DEC6 MUX", SND_SOC_NOPM,
-			   TX_MACRO_DEC6, 0,
-			   &tx_dec6_mux, tx_macro_enable_dec,
-			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
-			   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_MUX_E("TX DEC7 MUX", SND_SOC_NOPM,
-			   TX_MACRO_DEC7, 0,
-			   &tx_dec7_mux, tx_macro_enable_dec,
-			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
-			   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_SUPPLY_S("VA_SWR_CLK", 0, SND_SOC_NOPM, 0, 0,
-			tx_macro_va_swr_clk_event,
-			SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
-};
-
-static const struct snd_soc_dapm_widget tx_macro_dapm_widgets[] = {
-	SND_SOC_DAPM_AIF_OUT("TX_AIF1 CAP", "TX_AIF1 Capture", 0,
-		SND_SOC_NOPM, TX_MACRO_AIF1_CAP, 0),
-
-	SND_SOC_DAPM_AIF_OUT("TX_AIF2 CAP", "TX_AIF2 Capture", 0,
-		SND_SOC_NOPM, TX_MACRO_AIF2_CAP, 0),
-
-	SND_SOC_DAPM_AIF_OUT("TX_AIF3 CAP", "TX_AIF3 Capture", 0,
-		SND_SOC_NOPM, TX_MACRO_AIF3_CAP, 0),
-
-	SND_SOC_DAPM_MIXER("TX_AIF1_CAP Mixer", SND_SOC_NOPM, TX_MACRO_AIF1_CAP, 0,
-		tx_aif1_cap_mixer, ARRAY_SIZE(tx_aif1_cap_mixer)),
-
-	SND_SOC_DAPM_MIXER("TX_AIF2_CAP Mixer", SND_SOC_NOPM, TX_MACRO_AIF2_CAP, 0,
-		tx_aif2_cap_mixer, ARRAY_SIZE(tx_aif2_cap_mixer)),
-
-	SND_SOC_DAPM_MIXER("TX_AIF3_CAP Mixer", SND_SOC_NOPM, TX_MACRO_AIF3_CAP, 0,
-		tx_aif3_cap_mixer, ARRAY_SIZE(tx_aif3_cap_mixer)),
-
-
-	TX_MACRO_DAPM_MUX("TX DMIC MUX0", 0, tx_dmic0),
-	TX_MACRO_DAPM_MUX("TX DMIC MUX1", 0, tx_dmic1),
-	TX_MACRO_DAPM_MUX("TX DMIC MUX2", 0, tx_dmic2),
-	TX_MACRO_DAPM_MUX("TX DMIC MUX3", 0, tx_dmic3),
-	TX_MACRO_DAPM_MUX("TX DMIC MUX4", 0, tx_dmic4),
-	TX_MACRO_DAPM_MUX("TX DMIC MUX5", 0, tx_dmic5),
-	TX_MACRO_DAPM_MUX("TX DMIC MUX6", 0, tx_dmic6),
-	TX_MACRO_DAPM_MUX("TX DMIC MUX7", 0, tx_dmic7),
-
-	TX_MACRO_DAPM_MUX("TX SMIC MUX0", 0, tx_smic0),
-	TX_MACRO_DAPM_MUX("TX SMIC MUX1", 0, tx_smic1),
-	TX_MACRO_DAPM_MUX("TX SMIC MUX2", 0, tx_smic2),
-	TX_MACRO_DAPM_MUX("TX SMIC MUX3", 0, tx_smic3),
-	TX_MACRO_DAPM_MUX("TX SMIC MUX4", 0, tx_smic4),
-	TX_MACRO_DAPM_MUX("TX SMIC MUX5", 0, tx_smic5),
-	TX_MACRO_DAPM_MUX("TX SMIC MUX6", 0, tx_smic6),
-	TX_MACRO_DAPM_MUX("TX SMIC MUX7", 0, tx_smic7),
-
-	SND_SOC_DAPM_MICBIAS_E("TX MIC BIAS1", SND_SOC_NOPM, 0, 0,
-			       tx_macro_enable_micbias,
-			       SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
-	SND_SOC_DAPM_ADC_E("TX DMIC0", NULL, SND_SOC_NOPM, 0, 0,
-		tx_macro_enable_dmic, SND_SOC_DAPM_PRE_PMU |
-		SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_ADC_E("TX DMIC1", NULL, SND_SOC_NOPM, 0, 0,
-		tx_macro_enable_dmic, SND_SOC_DAPM_PRE_PMU |
-		SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_ADC_E("TX DMIC2", NULL, SND_SOC_NOPM, 0, 0,
-		tx_macro_enable_dmic, SND_SOC_DAPM_PRE_PMU |
-		SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_ADC_E("TX DMIC3", NULL, SND_SOC_NOPM, 0, 0,
-		tx_macro_enable_dmic, SND_SOC_DAPM_PRE_PMU |
-		SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_ADC_E("TX DMIC4", NULL, SND_SOC_NOPM, 0, 0,
-		tx_macro_enable_dmic, SND_SOC_DAPM_PRE_PMU |
-		SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_ADC_E("TX DMIC5", NULL, SND_SOC_NOPM, 0, 0,
-		tx_macro_enable_dmic, SND_SOC_DAPM_PRE_PMU |
-		SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_ADC_E("TX DMIC6", NULL, SND_SOC_NOPM, 0, 0,
-		tx_macro_enable_dmic, SND_SOC_DAPM_PRE_PMU |
-		SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_ADC_E("TX DMIC7", NULL, SND_SOC_NOPM, 0, 0,
-		tx_macro_enable_dmic, SND_SOC_DAPM_PRE_PMU |
-		SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_INPUT("TX SWR_ADC0"),
-	SND_SOC_DAPM_INPUT("TX SWR_ADC1"),
-	SND_SOC_DAPM_INPUT("TX SWR_ADC2"),
-	SND_SOC_DAPM_INPUT("TX SWR_ADC3"),
-	SND_SOC_DAPM_INPUT("TX SWR_DMIC0"),
-	SND_SOC_DAPM_INPUT("TX SWR_DMIC1"),
-	SND_SOC_DAPM_INPUT("TX SWR_DMIC2"),
-	SND_SOC_DAPM_INPUT("TX SWR_DMIC3"),
-	SND_SOC_DAPM_INPUT("TX SWR_DMIC4"),
-	SND_SOC_DAPM_INPUT("TX SWR_DMIC5"),
-	SND_SOC_DAPM_INPUT("TX SWR_DMIC6"),
-	SND_SOC_DAPM_INPUT("TX SWR_DMIC7"),
-
-	SND_SOC_DAPM_MUX_E("TX DEC0 MUX", SND_SOC_NOPM,
-			   TX_MACRO_DEC0, 0,
-			   &tx_dec0_mux, tx_macro_enable_dec,
-			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
-			   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_MUX_E("TX DEC1 MUX", SND_SOC_NOPM,
-			   TX_MACRO_DEC1, 0,
-			   &tx_dec1_mux, tx_macro_enable_dec,
-			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
-			   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_MUX_E("TX DEC2 MUX", SND_SOC_NOPM,
-			   TX_MACRO_DEC2, 0,
-			   &tx_dec2_mux, tx_macro_enable_dec,
-			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
-			   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_MUX_E("TX DEC3 MUX", SND_SOC_NOPM,
-			   TX_MACRO_DEC3, 0,
-			   &tx_dec3_mux, tx_macro_enable_dec,
-			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
-			   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_MUX_E("TX DEC4 MUX", SND_SOC_NOPM,
-			   TX_MACRO_DEC4, 0,
-			   &tx_dec4_mux, tx_macro_enable_dec,
-			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
-			   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_MUX_E("TX DEC5 MUX", SND_SOC_NOPM,
-			   TX_MACRO_DEC5, 0,
-			   &tx_dec5_mux, tx_macro_enable_dec,
-			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
-			   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_MUX_E("TX DEC6 MUX", SND_SOC_NOPM,
-			   TX_MACRO_DEC6, 0,
-			   &tx_dec6_mux, tx_macro_enable_dec,
-			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
-			   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_MUX_E("TX DEC7 MUX", SND_SOC_NOPM,
-			   TX_MACRO_DEC7, 0,
-			   &tx_dec7_mux, tx_macro_enable_dec,
-			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
-			   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_SUPPLY_S("TX_MCLK", 0, SND_SOC_NOPM, 0, 0,
-	tx_macro_mclk_event, SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_SUPPLY_S("TX_SWR_CLK", 0, SND_SOC_NOPM, 0, 0,
-			tx_macro_tx_swr_clk_event,
-			SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
-
-	SND_SOC_DAPM_SUPPLY_S("VA_SWR_CLK", 0, SND_SOC_NOPM, 0, 0,
-			tx_macro_va_swr_clk_event,
-			SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
-};
-
-static const struct snd_soc_dapm_route tx_audio_map_common[] = {
-	{"TX_AIF1 CAP", NULL, "TX_MCLK"},
-	{"TX_AIF2 CAP", NULL, "TX_MCLK"},
-	{"TX_AIF3 CAP", NULL, "TX_MCLK"},
-
-	{"TX_AIF1 CAP", NULL, "TX_AIF1_CAP Mixer"},
-	{"TX_AIF2 CAP", NULL, "TX_AIF2_CAP Mixer"},
-	{"TX_AIF3 CAP", NULL, "TX_AIF3_CAP Mixer"},
-
-	{"TX_AIF1_CAP Mixer", "DEC0", "TX DEC0 MUX"},
-	{"TX_AIF1_CAP Mixer", "DEC1", "TX DEC1 MUX"},
-	{"TX_AIF1_CAP Mixer", "DEC2", "TX DEC2 MUX"},
-	{"TX_AIF1_CAP Mixer", "DEC3", "TX DEC3 MUX"},
-
-	{"TX_AIF2_CAP Mixer", "DEC0", "TX DEC0 MUX"},
-	{"TX_AIF2_CAP Mixer", "DEC1", "TX DEC1 MUX"},
-	{"TX_AIF2_CAP Mixer", "DEC2", "TX DEC2 MUX"},
-	{"TX_AIF2_CAP Mixer", "DEC3", "TX DEC3 MUX"},
-
-	{"TX_AIF3_CAP Mixer", "DEC0", "TX DEC0 MUX"},
-	{"TX_AIF3_CAP Mixer", "DEC1", "TX DEC1 MUX"},
-	{"TX_AIF3_CAP Mixer", "DEC2", "TX DEC2 MUX"},
-	{"TX_AIF3_CAP Mixer", "DEC3", "TX DEC3 MUX"},
-
-	{"TX DEC0 MUX", NULL, "TX_MCLK"},
-	{"TX DEC1 MUX", NULL, "TX_MCLK"},
-	{"TX DEC2 MUX", NULL, "TX_MCLK"},
-	{"TX DEC3 MUX", NULL, "TX_MCLK"},
-
-	{"TX DEC0 MUX", "MSM_DMIC", "TX DMIC MUX0"},
-	{"TX DMIC MUX0", "DMIC0", "TX DMIC0"},
-	{"TX DMIC MUX0", "DMIC1", "TX DMIC1"},
-	{"TX DMIC MUX0", "DMIC2", "TX DMIC2"},
-	{"TX DMIC MUX0", "DMIC3", "TX DMIC3"},
-	{"TX DMIC MUX0", "DMIC4", "TX DMIC4"},
-	{"TX DMIC MUX0", "DMIC5", "TX DMIC5"},
-	{"TX DMIC MUX0", "DMIC6", "TX DMIC6"},
-	{"TX DMIC MUX0", "DMIC7", "TX DMIC7"},
-
-	{"TX DEC0 MUX", "SWR_MIC", "TX SMIC MUX0"},
-	{"TX SMIC MUX0", "SWR_MIC0", "TX SWR_MIC0"},
-	{"TX SMIC MUX0", "SWR_MIC1", "TX SWR_MIC1"},
-	{"TX SMIC MUX0", "SWR_MIC2", "TX SWR_MIC2"},
-	{"TX SMIC MUX0", "SWR_MIC3", "TX SWR_MIC3"},
-	{"TX SMIC MUX0", "SWR_MIC4", "TX SWR_MIC4"},
-	{"TX SMIC MUX0", "SWR_MIC5", "TX SWR_MIC5"},
-	{"TX SMIC MUX0", "SWR_MIC6", "TX SWR_MIC6"},
-	{"TX SMIC MUX0", "SWR_MIC7", "TX SWR_MIC7"},
-	{"TX SMIC MUX0", "SWR_MIC8", "TX SWR_MIC8"},
-	{"TX SMIC MUX0", "SWR_MIC9", "TX SWR_MIC9"},
-	{"TX SMIC MUX0", "SWR_MIC10", "TX SWR_MIC10"},
-	{"TX SMIC MUX0", "SWR_MIC11", "TX SWR_MIC11"},
-
-	{"TX DEC1 MUX", "MSM_DMIC", "TX DMIC MUX1"},
-	{"TX DMIC MUX1", "DMIC0", "TX DMIC0"},
-	{"TX DMIC MUX1", "DMIC1", "TX DMIC1"},
-	{"TX DMIC MUX1", "DMIC2", "TX DMIC2"},
-	{"TX DMIC MUX1", "DMIC3", "TX DMIC3"},
-	{"TX DMIC MUX1", "DMIC4", "TX DMIC4"},
-	{"TX DMIC MUX1", "DMIC5", "TX DMIC5"},
-	{"TX DMIC MUX1", "DMIC6", "TX DMIC6"},
-	{"TX DMIC MUX1", "DMIC7", "TX DMIC7"},
-
-	{"TX DEC1 MUX", "SWR_MIC", "TX SMIC MUX1"},
-	{"TX SMIC MUX1", "SWR_MIC0", "TX SWR_MIC0"},
-	{"TX SMIC MUX1", "SWR_MIC1", "TX SWR_MIC1"},
-	{"TX SMIC MUX1", "SWR_MIC2", "TX SWR_MIC2"},
-	{"TX SMIC MUX1", "SWR_MIC3", "TX SWR_MIC3"},
-	{"TX SMIC MUX1", "SWR_MIC4", "TX SWR_MIC4"},
-	{"TX SMIC MUX1", "SWR_MIC5", "TX SWR_MIC5"},
-	{"TX SMIC MUX1", "SWR_MIC6", "TX SWR_MIC6"},
-	{"TX SMIC MUX1", "SWR_MIC7", "TX SWR_MIC7"},
-	{"TX SMIC MUX1", "SWR_MIC8", "TX SWR_MIC8"},
-	{"TX SMIC MUX1", "SWR_MIC9", "TX SWR_MIC9"},
-	{"TX SMIC MUX1", "SWR_MIC10", "TX SWR_MIC10"},
-	{"TX SMIC MUX1", "SWR_MIC11", "TX SWR_MIC11"},
-
-	{"TX DEC2 MUX", "MSM_DMIC", "TX DMIC MUX2"},
-	{"TX DMIC MUX2", "DMIC0", "TX DMIC0"},
-	{"TX DMIC MUX2", "DMIC1", "TX DMIC1"},
-	{"TX DMIC MUX2", "DMIC2", "TX DMIC2"},
-	{"TX DMIC MUX2", "DMIC3", "TX DMIC3"},
-	{"TX DMIC MUX2", "DMIC4", "TX DMIC4"},
-	{"TX DMIC MUX2", "DMIC5", "TX DMIC5"},
-	{"TX DMIC MUX2", "DMIC6", "TX DMIC6"},
-	{"TX DMIC MUX2", "DMIC7", "TX DMIC7"},
-
-	{"TX DEC2 MUX", "SWR_MIC", "TX SMIC MUX2"},
-	{"TX SMIC MUX2", "SWR_MIC0", "TX SWR_MIC0"},
-	{"TX SMIC MUX2", "SWR_MIC1", "TX SWR_MIC1"},
-	{"TX SMIC MUX2", "SWR_MIC2", "TX SWR_MIC2"},
-	{"TX SMIC MUX2", "SWR_MIC3", "TX SWR_MIC3"},
-	{"TX SMIC MUX2", "SWR_MIC4", "TX SWR_MIC4"},
-	{"TX SMIC MUX2", "SWR_MIC5", "TX SWR_MIC5"},
-	{"TX SMIC MUX2", "SWR_MIC6", "TX SWR_MIC6"},
-	{"TX SMIC MUX2", "SWR_MIC7", "TX SWR_MIC7"},
-	{"TX SMIC MUX2", "SWR_MIC8", "TX SWR_MIC8"},
-	{"TX SMIC MUX2", "SWR_MIC9", "TX SWR_MIC9"},
-	{"TX SMIC MUX2", "SWR_MIC10", "TX SWR_MIC10"},
-	{"TX SMIC MUX2", "SWR_MIC11", "TX SWR_MIC11"},
-
-	{"TX DEC3 MUX", "MSM_DMIC", "TX DMIC MUX3"},
-	{"TX DMIC MUX3", "DMIC0", "TX DMIC0"},
-	{"TX DMIC MUX3", "DMIC1", "TX DMIC1"},
-	{"TX DMIC MUX3", "DMIC2", "TX DMIC2"},
-	{"TX DMIC MUX3", "DMIC3", "TX DMIC3"},
-	{"TX DMIC MUX3", "DMIC4", "TX DMIC4"},
-	{"TX DMIC MUX3", "DMIC5", "TX DMIC5"},
-	{"TX DMIC MUX3", "DMIC6", "TX DMIC6"},
-	{"TX DMIC MUX3", "DMIC7", "TX DMIC7"},
-
-	{"TX DEC3 MUX", "SWR_MIC", "TX SMIC MUX3"},
-	{"TX SMIC MUX3", "SWR_MIC0", "TX SWR_MIC0"},
-	{"TX SMIC MUX3", "SWR_MIC1", "TX SWR_MIC1"},
-	{"TX SMIC MUX3", "SWR_MIC2", "TX SWR_MIC2"},
-	{"TX SMIC MUX3", "SWR_MIC3", "TX SWR_MIC3"},
-	{"TX SMIC MUX3", "SWR_MIC4", "TX SWR_MIC4"},
-	{"TX SMIC MUX3", "SWR_MIC5", "TX SWR_MIC5"},
-	{"TX SMIC MUX3", "SWR_MIC6", "TX SWR_MIC6"},
-	{"TX SMIC MUX3", "SWR_MIC7", "TX SWR_MIC7"},
-	{"TX SMIC MUX3", "SWR_MIC8", "TX SWR_MIC8"},
-	{"TX SMIC MUX3", "SWR_MIC9", "TX SWR_MIC9"},
-	{"TX SMIC MUX3", "SWR_MIC10", "TX SWR_MIC10"},
-	{"TX SMIC MUX3", "SWR_MIC11", "TX SWR_MIC11"},
-};
-
-static const struct snd_soc_dapm_route tx_audio_map_v3[] = {
-	{"TX_AIF1_CAP Mixer", "DEC4", "TX DEC4 MUX"},
-	{"TX_AIF1_CAP Mixer", "DEC5", "TX DEC5 MUX"},
-	{"TX_AIF1_CAP Mixer", "DEC6", "TX DEC6 MUX"},
-	{"TX_AIF1_CAP Mixer", "DEC7", "TX DEC7 MUX"},
-
-	{"TX_AIF2_CAP Mixer", "DEC4", "TX DEC4 MUX"},
-	{"TX_AIF2_CAP Mixer", "DEC5", "TX DEC5 MUX"},
-	{"TX_AIF2_CAP Mixer", "DEC6", "TX DEC6 MUX"},
-	{"TX_AIF2_CAP Mixer", "DEC7", "TX DEC7 MUX"},
-
-	{"TX_AIF3_CAP Mixer", "DEC4", "TX DEC4 MUX"},
-	{"TX_AIF3_CAP Mixer", "DEC5", "TX DEC5 MUX"},
-	{"TX_AIF3_CAP Mixer", "DEC6", "TX DEC6 MUX"},
-	{"TX_AIF3_CAP Mixer", "DEC7", "TX DEC7 MUX"},
-
-	{"TX DEC4 MUX", NULL, "TX_MCLK"},
-	{"TX DEC5 MUX", NULL, "TX_MCLK"},
-	{"TX DEC6 MUX", NULL, "TX_MCLK"},
-	{"TX DEC7 MUX", NULL, "TX_MCLK"},
-
-	{"TX DEC4 MUX", "MSM_DMIC", "TX DMIC MUX4"},
-	{"TX DMIC MUX4", "DMIC0", "TX DMIC0"},
-	{"TX DMIC MUX4", "DMIC1", "TX DMIC1"},
-	{"TX DMIC MUX4", "DMIC2", "TX DMIC2"},
-	{"TX DMIC MUX4", "DMIC3", "TX DMIC3"},
-	{"TX DMIC MUX4", "DMIC4", "TX DMIC4"},
-	{"TX DMIC MUX4", "DMIC5", "TX DMIC5"},
-	{"TX DMIC MUX4", "DMIC6", "TX DMIC6"},
-	{"TX DMIC MUX4", "DMIC7", "TX DMIC7"},
-
-	{"TX DEC4 MUX", "SWR_MIC", "TX SMIC MUX4"},
-	{"TX SMIC MUX4", "SWR_MIC0", "TX SWR_MIC0"},
-	{"TX SMIC MUX4", "SWR_MIC1", "TX SWR_MIC1"},
-	{"TX SMIC MUX4", "SWR_MIC2", "TX SWR_MIC2"},
-	{"TX SMIC MUX4", "SWR_MIC3", "TX SWR_MIC3"},
-	{"TX SMIC MUX4", "SWR_MIC4", "TX SWR_MIC4"},
-	{"TX SMIC MUX4", "SWR_MIC5", "TX SWR_MIC5"},
-	{"TX SMIC MUX4", "SWR_MIC6", "TX SWR_MIC6"},
-	{"TX SMIC MUX4", "SWR_MIC7", "TX SWR_MIC7"},
-	{"TX SMIC MUX4", "SWR_MIC8", "TX SWR_MIC8"},
-	{"TX SMIC MUX4", "SWR_MIC9", "TX SWR_MIC9"},
-	{"TX SMIC MUX4", "SWR_MIC10", "TX SWR_MIC10"},
-	{"TX SMIC MUX4", "SWR_MIC11", "TX SWR_MIC11"},
-
-	{"TX DEC5 MUX", "MSM_DMIC", "TX DMIC MUX5"},
-	{"TX DMIC MUX5", "DMIC0", "TX DMIC0"},
-	{"TX DMIC MUX5", "DMIC1", "TX DMIC1"},
-	{"TX DMIC MUX5", "DMIC2", "TX DMIC2"},
-	{"TX DMIC MUX5", "DMIC3", "TX DMIC3"},
-	{"TX DMIC MUX5", "DMIC4", "TX DMIC4"},
-	{"TX DMIC MUX5", "DMIC5", "TX DMIC5"},
-	{"TX DMIC MUX5", "DMIC6", "TX DMIC6"},
-	{"TX DMIC MUX5", "DMIC7", "TX DMIC7"},
-
-	{"TX DEC5 MUX", "SWR_MIC", "TX SMIC MUX5"},
-	{"TX SMIC MUX5", "SWR_MIC0", "TX SWR_MIC0"},
-	{"TX SMIC MUX5", "SWR_MIC1", "TX SWR_MIC1"},
-	{"TX SMIC MUX5", "SWR_MIC2", "TX SWR_MIC2"},
-	{"TX SMIC MUX5", "SWR_MIC3", "TX SWR_MIC3"},
-	{"TX SMIC MUX5", "SWR_MIC4", "TX SWR_MIC4"},
-	{"TX SMIC MUX5", "SWR_MIC5", "TX SWR_MIC5"},
-	{"TX SMIC MUX5", "SWR_MIC6", "TX SWR_MIC6"},
-	{"TX SMIC MUX5", "SWR_MIC7", "TX SWR_MIC7"},
-	{"TX SMIC MUX5", "SWR_MIC8", "TX SWR_MIC8"},
-	{"TX SMIC MUX5", "SWR_MIC9", "TX SWR_MIC9"},
-	{"TX SMIC MUX5", "SWR_MIC10", "TX SWR_MIC10"},
-	{"TX SMIC MUX5", "SWR_MIC11", "TX SWR_MIC11"},
-
-	{"TX DEC6 MUX", "MSM_DMIC", "TX DMIC MUX6"},
-	{"TX DMIC MUX6", "DMIC0", "TX DMIC0"},
-	{"TX DMIC MUX6", "DMIC1", "TX DMIC1"},
-	{"TX DMIC MUX6", "DMIC2", "TX DMIC2"},
-	{"TX DMIC MUX6", "DMIC3", "TX DMIC3"},
-	{"TX DMIC MUX6", "DMIC4", "TX DMIC4"},
-	{"TX DMIC MUX6", "DMIC5", "TX DMIC5"},
-	{"TX DMIC MUX6", "DMIC6", "TX DMIC6"},
-	{"TX DMIC MUX6", "DMIC7", "TX DMIC7"},
-
-	{"TX DEC6 MUX", "SWR_MIC", "TX SMIC MUX6"},
-	{"TX SMIC MUX6", "SWR_MIC0", "TX SWR_MIC0"},
-	{"TX SMIC MUX6", "SWR_MIC1", "TX SWR_MIC1"},
-	{"TX SMIC MUX6", "SWR_MIC2", "TX SWR_MIC2"},
-	{"TX SMIC MUX6", "SWR_MIC3", "TX SWR_MIC3"},
-	{"TX SMIC MUX6", "SWR_MIC4", "TX SWR_MIC4"},
-	{"TX SMIC MUX6", "SWR_MIC5", "TX SWR_MIC5"},
-	{"TX SMIC MUX6", "SWR_MIC6", "TX SWR_MIC6"},
-	{"TX SMIC MUX6", "SWR_MIC7", "TX SWR_MIC7"},
-	{"TX SMIC MUX6", "SWR_MIC8", "TX SWR_MIC8"},
-	{"TX SMIC MUX6", "SWR_MIC9", "TX SWR_MIC9"},
-	{"TX SMIC MUX6", "SWR_MIC10", "TX SWR_MIC10"},
-	{"TX SMIC MUX6", "SWR_MIC11", "TX SWR_MIC11"},
-
-	{"TX DEC7 MUX", "MSM_DMIC", "TX DMIC MUX7"},
-	{"TX DMIC MUX7", "DMIC0", "TX DMIC0"},
-	{"TX DMIC MUX7", "DMIC1", "TX DMIC1"},
-	{"TX DMIC MUX7", "DMIC2", "TX DMIC2"},
-	{"TX DMIC MUX7", "DMIC3", "TX DMIC3"},
-	{"TX DMIC MUX7", "DMIC4", "TX DMIC4"},
-	{"TX DMIC MUX7", "DMIC5", "TX DMIC5"},
-	{"TX DMIC MUX7", "DMIC6", "TX DMIC6"},
-	{"TX DMIC MUX7", "DMIC7", "TX DMIC7"},
-
-	{"TX DEC7 MUX", "SWR_MIC", "TX SMIC MUX7"},
-	{"TX SMIC MUX7", "SWR_MIC0", "TX SWR_MIC0"},
-	{"TX SMIC MUX7", "SWR_MIC1", "TX SWR_MIC1"},
-	{"TX SMIC MUX7", "SWR_MIC2", "TX SWR_MIC2"},
-	{"TX SMIC MUX7", "SWR_MIC3", "TX SWR_MIC3"},
-	{"TX SMIC MUX7", "SWR_MIC4", "TX SWR_MIC4"},
-	{"TX SMIC MUX7", "SWR_MIC5", "TX SWR_MIC5"},
-	{"TX SMIC MUX7", "SWR_MIC6", "TX SWR_MIC6"},
-	{"TX SMIC MUX7", "SWR_MIC7", "TX SWR_MIC7"},
-	{"TX SMIC MUX7", "SWR_MIC8", "TX SWR_MIC8"},
-	{"TX SMIC MUX7", "SWR_MIC9", "TX SWR_MIC9"},
-	{"TX SMIC MUX7", "SWR_MIC10", "TX SWR_MIC10"},
-	{"TX SMIC MUX7", "SWR_MIC11", "TX SWR_MIC11"},
-};
-
-static const struct snd_soc_dapm_route tx_audio_map[] = {
-	{"TX_AIF1 CAP", NULL, "TX_MCLK"},
-	{"TX_AIF2 CAP", NULL, "TX_MCLK"},
-	{"TX_AIF3 CAP", NULL, "TX_MCLK"},
-
-	{"TX_AIF1 CAP", NULL, "TX_AIF1_CAP Mixer"},
-	{"TX_AIF2 CAP", NULL, "TX_AIF2_CAP Mixer"},
-	{"TX_AIF3 CAP", NULL, "TX_AIF3_CAP Mixer"},
-
-	{"TX_AIF1_CAP Mixer", "DEC0", "TX DEC0 MUX"},
-	{"TX_AIF1_CAP Mixer", "DEC1", "TX DEC1 MUX"},
-	{"TX_AIF1_CAP Mixer", "DEC2", "TX DEC2 MUX"},
-	{"TX_AIF1_CAP Mixer", "DEC3", "TX DEC3 MUX"},
-	{"TX_AIF1_CAP Mixer", "DEC4", "TX DEC4 MUX"},
-	{"TX_AIF1_CAP Mixer", "DEC5", "TX DEC5 MUX"},
-	{"TX_AIF1_CAP Mixer", "DEC6", "TX DEC6 MUX"},
-	{"TX_AIF1_CAP Mixer", "DEC7", "TX DEC7 MUX"},
-
-	{"TX_AIF2_CAP Mixer", "DEC0", "TX DEC0 MUX"},
-	{"TX_AIF2_CAP Mixer", "DEC1", "TX DEC1 MUX"},
-	{"TX_AIF2_CAP Mixer", "DEC2", "TX DEC2 MUX"},
-	{"TX_AIF2_CAP Mixer", "DEC3", "TX DEC3 MUX"},
-	{"TX_AIF2_CAP Mixer", "DEC4", "TX DEC4 MUX"},
-	{"TX_AIF2_CAP Mixer", "DEC5", "TX DEC5 MUX"},
-	{"TX_AIF2_CAP Mixer", "DEC6", "TX DEC6 MUX"},
-	{"TX_AIF2_CAP Mixer", "DEC7", "TX DEC7 MUX"},
-
-	{"TX_AIF3_CAP Mixer", "DEC0", "TX DEC0 MUX"},
-	{"TX_AIF3_CAP Mixer", "DEC1", "TX DEC1 MUX"},
-	{"TX_AIF3_CAP Mixer", "DEC2", "TX DEC2 MUX"},
-	{"TX_AIF3_CAP Mixer", "DEC3", "TX DEC3 MUX"},
-	{"TX_AIF3_CAP Mixer", "DEC4", "TX DEC4 MUX"},
-	{"TX_AIF3_CAP Mixer", "DEC5", "TX DEC5 MUX"},
-	{"TX_AIF3_CAP Mixer", "DEC6", "TX DEC6 MUX"},
-	{"TX_AIF3_CAP Mixer", "DEC7", "TX DEC7 MUX"},
-
-	{"TX DEC0 MUX", NULL, "TX_MCLK"},
-	{"TX DEC1 MUX", NULL, "TX_MCLK"},
-	{"TX DEC2 MUX", NULL, "TX_MCLK"},
-	{"TX DEC3 MUX", NULL, "TX_MCLK"},
-	{"TX DEC4 MUX", NULL, "TX_MCLK"},
-	{"TX DEC5 MUX", NULL, "TX_MCLK"},
-	{"TX DEC6 MUX", NULL, "TX_MCLK"},
-	{"TX DEC7 MUX", NULL, "TX_MCLK"},
-
-	{"TX DEC0 MUX", "MSM_DMIC", "TX DMIC MUX0"},
-	{"TX DMIC MUX0", "DMIC0", "TX DMIC0"},
-	{"TX DMIC MUX0", "DMIC1", "TX DMIC1"},
-	{"TX DMIC MUX0", "DMIC2", "TX DMIC2"},
-	{"TX DMIC MUX0", "DMIC3", "TX DMIC3"},
-	{"TX DMIC MUX0", "DMIC4", "TX DMIC4"},
-	{"TX DMIC MUX0", "DMIC5", "TX DMIC5"},
-	{"TX DMIC MUX0", "DMIC6", "TX DMIC6"},
-	{"TX DMIC MUX0", "DMIC7", "TX DMIC7"},
-
-	{"TX DEC0 MUX", "SWR_MIC", "TX SMIC MUX0"},
-	{"TX SMIC MUX0", NULL, "TX_SWR_CLK"},
-	{"TX SMIC MUX0", "ADC0", "TX SWR_ADC0"},
-	{"TX SMIC MUX0", "ADC1", "TX SWR_ADC1"},
-	{"TX SMIC MUX0", "ADC2", "TX SWR_ADC2"},
-	{"TX SMIC MUX0", "ADC3", "TX SWR_ADC3"},
-	{"TX SMIC MUX0", "SWR_DMIC0", "TX SWR_DMIC0"},
-	{"TX SMIC MUX0", "SWR_DMIC1", "TX SWR_DMIC1"},
-	{"TX SMIC MUX0", "SWR_DMIC2", "TX SWR_DMIC2"},
-	{"TX SMIC MUX0", "SWR_DMIC3", "TX SWR_DMIC3"},
-	{"TX SMIC MUX0", "SWR_DMIC4", "TX SWR_DMIC4"},
-	{"TX SMIC MUX0", "SWR_DMIC5", "TX SWR_DMIC5"},
-	{"TX SMIC MUX0", "SWR_DMIC6", "TX SWR_DMIC6"},
-	{"TX SMIC MUX0", "SWR_DMIC7", "TX SWR_DMIC7"},
-
-	{"TX DEC1 MUX", "MSM_DMIC", "TX DMIC MUX1"},
-	{"TX DMIC MUX1", "DMIC0", "TX DMIC0"},
-	{"TX DMIC MUX1", "DMIC1", "TX DMIC1"},
-	{"TX DMIC MUX1", "DMIC2", "TX DMIC2"},
-	{"TX DMIC MUX1", "DMIC3", "TX DMIC3"},
-	{"TX DMIC MUX1", "DMIC4", "TX DMIC4"},
-	{"TX DMIC MUX1", "DMIC5", "TX DMIC5"},
-	{"TX DMIC MUX1", "DMIC6", "TX DMIC6"},
-	{"TX DMIC MUX1", "DMIC7", "TX DMIC7"},
-
-	{"TX DEC1 MUX", "SWR_MIC", "TX SMIC MUX1"},
-	{"TX SMIC MUX1", NULL, "TX_SWR_CLK"},
-	{"TX SMIC MUX1", "ADC0", "TX SWR_ADC0"},
-	{"TX SMIC MUX1", "ADC1", "TX SWR_ADC1"},
-	{"TX SMIC MUX1", "ADC2", "TX SWR_ADC2"},
-	{"TX SMIC MUX1", "ADC3", "TX SWR_ADC3"},
-	{"TX SMIC MUX1", "SWR_DMIC0", "TX SWR_DMIC0"},
-	{"TX SMIC MUX1", "SWR_DMIC1", "TX SWR_DMIC1"},
-	{"TX SMIC MUX1", "SWR_DMIC2", "TX SWR_DMIC2"},
-	{"TX SMIC MUX1", "SWR_DMIC3", "TX SWR_DMIC3"},
-	{"TX SMIC MUX1", "SWR_DMIC4", "TX SWR_DMIC4"},
-	{"TX SMIC MUX1", "SWR_DMIC5", "TX SWR_DMIC5"},
-	{"TX SMIC MUX1", "SWR_DMIC6", "TX SWR_DMIC6"},
-	{"TX SMIC MUX1", "SWR_DMIC7", "TX SWR_DMIC7"},
-
-	{"TX DEC2 MUX", "MSM_DMIC", "TX DMIC MUX2"},
-	{"TX DMIC MUX2", "DMIC0", "TX DMIC0"},
-	{"TX DMIC MUX2", "DMIC1", "TX DMIC1"},
-	{"TX DMIC MUX2", "DMIC2", "TX DMIC2"},
-	{"TX DMIC MUX2", "DMIC3", "TX DMIC3"},
-	{"TX DMIC MUX2", "DMIC4", "TX DMIC4"},
-	{"TX DMIC MUX2", "DMIC5", "TX DMIC5"},
-	{"TX DMIC MUX2", "DMIC6", "TX DMIC6"},
-	{"TX DMIC MUX2", "DMIC7", "TX DMIC7"},
-
-	{"TX DEC2 MUX", "SWR_MIC", "TX SMIC MUX2"},
-	{"TX SMIC MUX2", NULL, "TX_SWR_CLK"},
-	{"TX SMIC MUX2", "ADC0", "TX SWR_ADC0"},
-	{"TX SMIC MUX2", "ADC1", "TX SWR_ADC1"},
-	{"TX SMIC MUX2", "ADC2", "TX SWR_ADC2"},
-	{"TX SMIC MUX2", "ADC3", "TX SWR_ADC3"},
-	{"TX SMIC MUX2", "SWR_DMIC0", "TX SWR_DMIC0"},
-	{"TX SMIC MUX2", "SWR_DMIC1", "TX SWR_DMIC1"},
-	{"TX SMIC MUX2", "SWR_DMIC2", "TX SWR_DMIC2"},
-	{"TX SMIC MUX2", "SWR_DMIC3", "TX SWR_DMIC3"},
-	{"TX SMIC MUX2", "SWR_DMIC4", "TX SWR_DMIC4"},
-	{"TX SMIC MUX2", "SWR_DMIC5", "TX SWR_DMIC5"},
-	{"TX SMIC MUX2", "SWR_DMIC6", "TX SWR_DMIC6"},
-	{"TX SMIC MUX2", "SWR_DMIC7", "TX SWR_DMIC7"},
-
-	{"TX DEC3 MUX", "MSM_DMIC", "TX DMIC MUX3"},
-	{"TX DMIC MUX3", "DMIC0", "TX DMIC0"},
-	{"TX DMIC MUX3", "DMIC1", "TX DMIC1"},
-	{"TX DMIC MUX3", "DMIC2", "TX DMIC2"},
-	{"TX DMIC MUX3", "DMIC3", "TX DMIC3"},
-	{"TX DMIC MUX3", "DMIC4", "TX DMIC4"},
-	{"TX DMIC MUX3", "DMIC5", "TX DMIC5"},
-	{"TX DMIC MUX3", "DMIC6", "TX DMIC6"},
-	{"TX DMIC MUX3", "DMIC7", "TX DMIC7"},
-
-	{"TX DEC3 MUX", "SWR_MIC", "TX SMIC MUX3"},
-	{"TX SMIC MUX3", NULL, "TX_SWR_CLK"},
-	{"TX SMIC MUX3", "ADC0", "TX SWR_ADC0"},
-	{"TX SMIC MUX3", "ADC1", "TX SWR_ADC1"},
-	{"TX SMIC MUX3", "ADC2", "TX SWR_ADC2"},
-	{"TX SMIC MUX3", "ADC3", "TX SWR_ADC3"},
-	{"TX SMIC MUX3", "SWR_DMIC0", "TX SWR_DMIC0"},
-	{"TX SMIC MUX3", "SWR_DMIC1", "TX SWR_DMIC1"},
-	{"TX SMIC MUX3", "SWR_DMIC2", "TX SWR_DMIC2"},
-	{"TX SMIC MUX3", "SWR_DMIC3", "TX SWR_DMIC3"},
-	{"TX SMIC MUX3", "SWR_DMIC4", "TX SWR_DMIC4"},
-	{"TX SMIC MUX3", "SWR_DMIC5", "TX SWR_DMIC5"},
-	{"TX SMIC MUX3", "SWR_DMIC6", "TX SWR_DMIC6"},
-	{"TX SMIC MUX3", "SWR_DMIC7", "TX SWR_DMIC7"},
-
-	{"TX DEC4 MUX", "MSM_DMIC", "TX DMIC MUX4"},
-	{"TX DMIC MUX4", "DMIC0", "TX DMIC0"},
-	{"TX DMIC MUX4", "DMIC1", "TX DMIC1"},
-	{"TX DMIC MUX4", "DMIC2", "TX DMIC2"},
-	{"TX DMIC MUX4", "DMIC3", "TX DMIC3"},
-	{"TX DMIC MUX4", "DMIC4", "TX DMIC4"},
-	{"TX DMIC MUX4", "DMIC5", "TX DMIC5"},
-	{"TX DMIC MUX4", "DMIC6", "TX DMIC6"},
-	{"TX DMIC MUX4", "DMIC7", "TX DMIC7"},
-
-	{"TX DEC4 MUX", "SWR_MIC", "TX SMIC MUX4"},
-	{"TX SMIC MUX4", NULL, "TX_SWR_CLK"},
-	{"TX SMIC MUX4", "ADC0", "TX SWR_ADC0"},
-	{"TX SMIC MUX4", "ADC1", "TX SWR_ADC1"},
-	{"TX SMIC MUX4", "ADC2", "TX SWR_ADC2"},
-	{"TX SMIC MUX4", "ADC3", "TX SWR_ADC3"},
-	{"TX SMIC MUX4", "SWR_DMIC0", "TX SWR_DMIC0"},
-	{"TX SMIC MUX4", "SWR_DMIC1", "TX SWR_DMIC1"},
-	{"TX SMIC MUX4", "SWR_DMIC2", "TX SWR_DMIC2"},
-	{"TX SMIC MUX4", "SWR_DMIC3", "TX SWR_DMIC3"},
-	{"TX SMIC MUX4", "SWR_DMIC4", "TX SWR_DMIC4"},
-	{"TX SMIC MUX4", "SWR_DMIC5", "TX SWR_DMIC5"},
-	{"TX SMIC MUX4", "SWR_DMIC6", "TX SWR_DMIC6"},
-	{"TX SMIC MUX4", "SWR_DMIC7", "TX SWR_DMIC7"},
-
-	{"TX DEC5 MUX", "MSM_DMIC", "TX DMIC MUX5"},
-	{"TX DMIC MUX5", "DMIC0", "TX DMIC0"},
-	{"TX DMIC MUX5", "DMIC1", "TX DMIC1"},
-	{"TX DMIC MUX5", "DMIC2", "TX DMIC2"},
-	{"TX DMIC MUX5", "DMIC3", "TX DMIC3"},
-	{"TX DMIC MUX5", "DMIC4", "TX DMIC4"},
-	{"TX DMIC MUX5", "DMIC5", "TX DMIC5"},
-	{"TX DMIC MUX5", "DMIC6", "TX DMIC6"},
-	{"TX DMIC MUX5", "DMIC7", "TX DMIC7"},
-
-	{"TX DEC5 MUX", "SWR_MIC", "TX SMIC MUX5"},
-	{"TX SMIC MUX5", NULL, "TX_SWR_CLK"},
-	{"TX SMIC MUX5", "ADC0", "TX SWR_ADC0"},
-	{"TX SMIC MUX5", "ADC1", "TX SWR_ADC1"},
-	{"TX SMIC MUX5", "ADC2", "TX SWR_ADC2"},
-	{"TX SMIC MUX5", "ADC3", "TX SWR_ADC3"},
-	{"TX SMIC MUX5", "SWR_DMIC0", "TX SWR_DMIC0"},
-	{"TX SMIC MUX5", "SWR_DMIC1", "TX SWR_DMIC1"},
-	{"TX SMIC MUX5", "SWR_DMIC2", "TX SWR_DMIC2"},
-	{"TX SMIC MUX5", "SWR_DMIC3", "TX SWR_DMIC3"},
-	{"TX SMIC MUX5", "SWR_DMIC4", "TX SWR_DMIC4"},
-	{"TX SMIC MUX5", "SWR_DMIC5", "TX SWR_DMIC5"},
-	{"TX SMIC MUX5", "SWR_DMIC6", "TX SWR_DMIC6"},
-	{"TX SMIC MUX5", "SWR_DMIC7", "TX SWR_DMIC7"},
-
-	{"TX DEC6 MUX", "MSM_DMIC", "TX DMIC MUX6"},
-	{"TX DMIC MUX6", "DMIC0", "TX DMIC0"},
-	{"TX DMIC MUX6", "DMIC1", "TX DMIC1"},
-	{"TX DMIC MUX6", "DMIC2", "TX DMIC2"},
-	{"TX DMIC MUX6", "DMIC3", "TX DMIC3"},
-	{"TX DMIC MUX6", "DMIC4", "TX DMIC4"},
-	{"TX DMIC MUX6", "DMIC5", "TX DMIC5"},
-	{"TX DMIC MUX6", "DMIC6", "TX DMIC6"},
-	{"TX DMIC MUX6", "DMIC7", "TX DMIC7"},
-
-	{"TX DEC6 MUX", "SWR_MIC", "TX SMIC MUX6"},
-	{"TX SMIC MUX6", NULL, "TX_SWR_CLK"},
-	{"TX SMIC MUX6", "ADC0", "TX SWR_ADC0"},
-	{"TX SMIC MUX6", "ADC1", "TX SWR_ADC1"},
-	{"TX SMIC MUX6", "ADC2", "TX SWR_ADC2"},
-	{"TX SMIC MUX6", "ADC3", "TX SWR_ADC3"},
-	{"TX SMIC MUX6", "SWR_DMIC0", "TX SWR_DMIC0"},
-	{"TX SMIC MUX6", "SWR_DMIC1", "TX SWR_DMIC1"},
-	{"TX SMIC MUX6", "SWR_DMIC2", "TX SWR_DMIC2"},
-	{"TX SMIC MUX6", "SWR_DMIC3", "TX SWR_DMIC3"},
-	{"TX SMIC MUX6", "SWR_DMIC4", "TX SWR_DMIC4"},
-	{"TX SMIC MUX6", "SWR_DMIC5", "TX SWR_DMIC5"},
-	{"TX SMIC MUX6", "SWR_DMIC6", "TX SWR_DMIC6"},
-	{"TX SMIC MUX6", "SWR_DMIC7", "TX SWR_DMIC7"},
-
-	{"TX DEC7 MUX", "MSM_DMIC", "TX DMIC MUX7"},
-	{"TX DMIC MUX7", "DMIC0", "TX DMIC0"},
-	{"TX DMIC MUX7", "DMIC1", "TX DMIC1"},
-	{"TX DMIC MUX7", "DMIC2", "TX DMIC2"},
-	{"TX DMIC MUX7", "DMIC3", "TX DMIC3"},
-	{"TX DMIC MUX7", "DMIC4", "TX DMIC4"},
-	{"TX DMIC MUX7", "DMIC5", "TX DMIC5"},
-	{"TX DMIC MUX7", "DMIC6", "TX DMIC6"},
-	{"TX DMIC MUX7", "DMIC7", "TX DMIC7"},
-
-	{"TX DEC7 MUX", "SWR_MIC", "TX SMIC MUX7"},
-	{"TX SMIC MUX7", NULL, "TX_SWR_CLK"},
-	{"TX SMIC MUX7", "ADC0", "TX SWR_ADC0"},
-	{"TX SMIC MUX7", "ADC1", "TX SWR_ADC1"},
-	{"TX SMIC MUX7", "ADC2", "TX SWR_ADC2"},
-	{"TX SMIC MUX7", "ADC3", "TX SWR_ADC3"},
-	{"TX SMIC MUX7", "SWR_DMIC0", "TX SWR_DMIC0"},
-	{"TX SMIC MUX7", "SWR_DMIC1", "TX SWR_DMIC1"},
-	{"TX SMIC MUX7", "SWR_DMIC2", "TX SWR_DMIC2"},
-	{"TX SMIC MUX7", "SWR_DMIC3", "TX SWR_DMIC3"},
-	{"TX SMIC MUX7", "SWR_DMIC4", "TX SWR_DMIC4"},
-	{"TX SMIC MUX7", "SWR_DMIC5", "TX SWR_DMIC5"},
-	{"TX SMIC MUX7", "SWR_DMIC6", "TX SWR_DMIC6"},
-	{"TX SMIC MUX7", "SWR_DMIC7", "TX SWR_DMIC7"},
-};
-
-static const struct snd_kcontrol_new tx_macro_snd_controls_common[] = {
-	SOC_SINGLE_SX_TLV("TX_DEC0 Volume",
-			  BOLERO_CDC_TX0_TX_VOL_CTL,
-			  0, -84, 40, digital_gain),
-	SOC_SINGLE_SX_TLV("TX_DEC1 Volume",
-			  BOLERO_CDC_TX1_TX_VOL_CTL,
-			  0, -84, 40, digital_gain),
-	SOC_SINGLE_SX_TLV("TX_DEC2 Volume",
-			  BOLERO_CDC_TX2_TX_VOL_CTL,
-			  0, -84, 40, digital_gain),
-	SOC_SINGLE_SX_TLV("TX_DEC3 Volume",
-			  BOLERO_CDC_TX3_TX_VOL_CTL,
-			  0, -84, 40, digital_gain),
-
-	SOC_ENUM_EXT("DEC0 MODE", dec_mode_mux_enum,
-			tx_macro_dec_mode_get, tx_macro_dec_mode_put),
-
-	SOC_ENUM_EXT("DEC1 MODE", dec_mode_mux_enum,
-			tx_macro_dec_mode_get, tx_macro_dec_mode_put),
-
-	SOC_ENUM_EXT("DEC2 MODE", dec_mode_mux_enum,
-			tx_macro_dec_mode_get, tx_macro_dec_mode_put),
-
-	SOC_ENUM_EXT("DEC3 MODE", dec_mode_mux_enum,
-			tx_macro_dec_mode_get, tx_macro_dec_mode_put),
-
-	SOC_SINGLE_EXT("DEC0_BCS Switch", SND_SOC_NOPM, 0, 1, 0,
-		       tx_macro_get_bcs, tx_macro_set_bcs),
-};
-
-static const struct snd_kcontrol_new tx_macro_snd_controls_v3[] = {
-	SOC_SINGLE_SX_TLV("TX_DEC4 Volume",
-			  BOLERO_CDC_TX4_TX_VOL_CTL,
-			  0, -84, 40, digital_gain),
-	SOC_SINGLE_SX_TLV("TX_DEC5 Volume",
-			  BOLERO_CDC_TX5_TX_VOL_CTL,
-			  0, -84, 40, digital_gain),
-	SOC_SINGLE_SX_TLV("TX_DEC6 Volume",
-			  BOLERO_CDC_TX6_TX_VOL_CTL,
-			  0, -84, 40, digital_gain),
-	SOC_SINGLE_SX_TLV("TX_DEC7 Volume",
-			  BOLERO_CDC_TX7_TX_VOL_CTL,
-			  0, -84, 40, digital_gain),
-
-	SOC_ENUM_EXT("DEC4 MODE", dec_mode_mux_enum,
-			tx_macro_dec_mode_get, tx_macro_dec_mode_put),
-
-	SOC_ENUM_EXT("DEC5 MODE", dec_mode_mux_enum,
-			tx_macro_dec_mode_get, tx_macro_dec_mode_put),
-
-	SOC_ENUM_EXT("DEC6 MODE", dec_mode_mux_enum,
-			tx_macro_dec_mode_get, tx_macro_dec_mode_put),
-
-	SOC_ENUM_EXT("DEC7 MODE", dec_mode_mux_enum,
-			tx_macro_dec_mode_get, tx_macro_dec_mode_put),
-};
-
-static const struct snd_kcontrol_new tx_macro_snd_controls[] = {
-	SOC_SINGLE_SX_TLV("TX_DEC0 Volume",
-			  BOLERO_CDC_TX0_TX_VOL_CTL,
-			  0, -84, 40, digital_gain),
-	SOC_SINGLE_SX_TLV("TX_DEC1 Volume",
-			  BOLERO_CDC_TX1_TX_VOL_CTL,
-			  0, -84, 40, digital_gain),
-	SOC_SINGLE_SX_TLV("TX_DEC2 Volume",
-			  BOLERO_CDC_TX2_TX_VOL_CTL,
-			  0, -84, 40, digital_gain),
-	SOC_SINGLE_SX_TLV("TX_DEC3 Volume",
-			  BOLERO_CDC_TX3_TX_VOL_CTL,
-			  0, -84, 40, digital_gain),
-	SOC_SINGLE_SX_TLV("TX_DEC4 Volume",
-			  BOLERO_CDC_TX4_TX_VOL_CTL,
-			  0, -84, 40, digital_gain),
-	SOC_SINGLE_SX_TLV("TX_DEC5 Volume",
-			  BOLERO_CDC_TX5_TX_VOL_CTL,
-			  0, -84, 40, digital_gain),
-	SOC_SINGLE_SX_TLV("TX_DEC6 Volume",
-			  BOLERO_CDC_TX6_TX_VOL_CTL,
-			  0, -84, 40, digital_gain),
-	SOC_SINGLE_SX_TLV("TX_DEC7 Volume",
-			  BOLERO_CDC_TX7_TX_VOL_CTL,
-			  0, -84, 40, digital_gain),
-
-	SOC_ENUM_EXT("DEC0 MODE", dec_mode_mux_enum,
-			tx_macro_dec_mode_get, tx_macro_dec_mode_put),
-
-	SOC_ENUM_EXT("DEC1 MODE", dec_mode_mux_enum,
-			tx_macro_dec_mode_get, tx_macro_dec_mode_put),
-
-	SOC_ENUM_EXT("DEC2 MODE", dec_mode_mux_enum,
-			tx_macro_dec_mode_get, tx_macro_dec_mode_put),
-
-	SOC_ENUM_EXT("DEC3 MODE", dec_mode_mux_enum,
-			tx_macro_dec_mode_get, tx_macro_dec_mode_put),
-
-	SOC_ENUM_EXT("DEC4 MODE", dec_mode_mux_enum,
-			tx_macro_dec_mode_get, tx_macro_dec_mode_put),
-
-	SOC_ENUM_EXT("DEC5 MODE", dec_mode_mux_enum,
-			tx_macro_dec_mode_get, tx_macro_dec_mode_put),
-
-	SOC_ENUM_EXT("DEC6 MODE", dec_mode_mux_enum,
-			tx_macro_dec_mode_get, tx_macro_dec_mode_put),
-
-	SOC_ENUM_EXT("DEC7 MODE", dec_mode_mux_enum,
-			tx_macro_dec_mode_get, tx_macro_dec_mode_put),
-
-	SOC_SINGLE_EXT("DEC0_BCS Switch", SND_SOC_NOPM, 0, 1, 0,
-		       tx_macro_get_bcs, tx_macro_set_bcs),
-};
-
-static int tx_macro_register_event_listener(struct snd_soc_codec *codec,
-					    bool enable)
+static int rx_macro_digital_mute(struct snd_soc_dai *dai, int mute)
 {
-	struct device *tx_dev = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
-	int ret = 0;
+	struct snd_soc_codec *codec = dai->codec;
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+	uint16_t j = 0, reg = 0, mix_reg = 0, dsm_reg = 0;
+	u16 int_mux_cfg0 = 0, int_mux_cfg1 = 0;
+	u8 int_mux_cfg0_val = 0, int_mux_cfg1_val = 0;
 
-	if (!codec)
+	if (mute)
+		return 0;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
 		return -EINVAL;
 
-	tx_dev = bolero_get_device_ptr(codec->dev, TX_MACRO);
-	if (!tx_dev) {
-		dev_err(codec->dev,
-			"%s: null device for macro!\n", __func__);
-		return -EINVAL;
+	switch (dai->id) {
+	case RX_MACRO_AIF1_PB:
+	case RX_MACRO_AIF2_PB:
+	case RX_MACRO_AIF3_PB:
+	case RX_MACRO_AIF4_PB:
+	for (j = 0; j < INTERP_MAX; j++) {
+		reg = BOLERO_CDC_RX_RX0_RX_PATH_CTL +
+				(j * RX_MACRO_RX_PATH_OFFSET);
+		mix_reg = BOLERO_CDC_RX_RX0_RX_PATH_MIX_CTL +
+				(j * RX_MACRO_RX_PATH_OFFSET);
+		dsm_reg = BOLERO_CDC_RX_RX0_RX_PATH_DSM_CTL +
+				(j * RX_MACRO_RX_PATH_OFFSET);
+		if (j == INTERP_AUX)
+			dsm_reg = BOLERO_CDC_RX_RX2_RX_PATH_DSM_CTL;
+		int_mux_cfg0 = BOLERO_CDC_RX_INP_MUX_RX_INT0_CFG0 + j * 8;
+		int_mux_cfg1 = int_mux_cfg0 + 4;
+		int_mux_cfg0_val = snd_soc_read(codec,
+							int_mux_cfg0);
+		int_mux_cfg1_val = snd_soc_read(codec,
+							int_mux_cfg1);
+		if (snd_soc_read(codec, dsm_reg) & 0x01) {
+			if (int_mux_cfg0_val || (int_mux_cfg1_val & 0xF0))
+				snd_soc_update_bits(codec,
+							reg, 0x20, 0x20);
+			if (int_mux_cfg1_val & 0x0F) {
+				snd_soc_update_bits(codec,
+							reg, 0x20, 0x20);
+				snd_soc_update_bits(codec,
+							mix_reg, 0x20, 0x20);
+			}
+		}
 	}
-	tx_priv = dev_get_drvdata(tx_dev);
-	if (!tx_priv) {
-		dev_err(codec->dev,
-			"%s: priv is null for macro!\n", __func__);
-		return -EINVAL;
-	}
-	if (tx_priv->swr_ctrl_data) {
-		if (enable) {
-			ret = swrm_wcd_notify(
-				tx_priv->swr_ctrl_data[0].tx_swr_pdev,
-				SWR_REGISTER_WAKEUP, NULL);
-			msm_cdc_pinctrl_set_wakeup_capable(
-					tx_priv->tx_swr_gpio_p, false);
-		} else {
-			msm_cdc_pinctrl_set_wakeup_capable(
-					tx_priv->tx_swr_gpio_p, true);
-			ret = swrm_wcd_notify(
-				tx_priv->swr_ctrl_data[0].tx_swr_pdev,
-				SWR_DEREGISTER_WAKEUP, NULL);
-		}
-	}
-
-	return ret;
-}
-
-static int tx_macro_tx_va_mclk_enable(struct tx_macro_priv *tx_priv,
-				      struct regmap *regmap, int clk_type,
-				      bool enable)
-{
-	int ret = 0, clk_tx_ret = 0;
-
-	dev_dbg(tx_priv->dev,
-		"%s: clock type %s, enable: %s tx_mclk_users: %d\n",
-		__func__, (clk_type ? "VA_MCLK" : "TX_MCLK"),
-		(enable ? "enable" : "disable"), tx_priv->tx_mclk_users);
-
-	if (enable) {
-		if (tx_priv->swr_clk_users == 0) {
-			ret = msm_cdc_pinctrl_select_active_state(
-						tx_priv->tx_swr_gpio_p);
-			if (ret < 0) {
-				dev_err_ratelimited(tx_priv->dev,
-					"%s: tx swr pinctrl enable failed\n",
-					__func__);
-				goto exit;
-			}
-		}
-
-		clk_tx_ret = bolero_clk_rsc_request_clock(tx_priv->dev,
-						   TX_CORE_CLK,
-						   TX_CORE_CLK,
-						   true);
-		if (clk_type == TX_MCLK) {
-			ret = tx_macro_mclk_enable(tx_priv, 1);
-			if (ret < 0) {
-				if (tx_priv->swr_clk_users == 0)
-					msm_cdc_pinctrl_select_sleep_state(
-							tx_priv->tx_swr_gpio_p);
-				dev_err_ratelimited(tx_priv->dev,
-					"%s: request clock enable failed\n",
-					__func__);
-				goto done;
-			}
-		}
-		if (clk_type == VA_MCLK) {
-			ret = bolero_clk_rsc_request_clock(tx_priv->dev,
-							   TX_CORE_CLK,
-							   VA_CORE_CLK,
-							   true);
-			if (ret < 0) {
-				if (tx_priv->swr_clk_users == 0)
-					msm_cdc_pinctrl_select_sleep_state(
-							tx_priv->tx_swr_gpio_p);
-				dev_err_ratelimited(tx_priv->dev,
-					"%s: swr request clk failed\n",
-					__func__);
-				goto done;
-			}
-			bolero_clk_rsc_fs_gen_request(tx_priv->dev,
-						  true);
-			if (tx_priv->tx_mclk_users == 0) {
-				regmap_update_bits(regmap,
-					BOLERO_CDC_TX_TOP_CSR_FREQ_MCLK,
-					0x01, 0x01);
-				regmap_update_bits(regmap,
-				BOLERO_CDC_TX_CLK_RST_CTRL_MCLK_CONTROL,
-					0x01, 0x01);
-				regmap_update_bits(regmap,
-			      BOLERO_CDC_TX_CLK_RST_CTRL_FS_CNT_CONTROL,
-					0x01, 0x01);
-			}
-		}
-		if (tx_priv->swr_clk_users == 0) {
-			dev_dbg(tx_priv->dev, "%s: reset_swr: %d\n",
-				__func__, tx_priv->reset_swr);
-			if (tx_priv->reset_swr)
-				regmap_update_bits(regmap,
-					BOLERO_CDC_TX_CLK_RST_CTRL_SWR_CONTROL,
-					0x02, 0x02);
-			regmap_update_bits(regmap,
-				BOLERO_CDC_TX_CLK_RST_CTRL_SWR_CONTROL,
-				0x01, 0x01);
-			if (tx_priv->reset_swr)
-				regmap_update_bits(regmap,
-					BOLERO_CDC_TX_CLK_RST_CTRL_SWR_CONTROL,
-					0x02, 0x00);
-			tx_priv->reset_swr = false;
-		}
-		if (!clk_tx_ret)
-			ret = bolero_clk_rsc_request_clock(tx_priv->dev,
-						   TX_CORE_CLK,
-						   TX_CORE_CLK,
-						   false);
-		tx_priv->swr_clk_users++;
-	} else {
-		if (tx_priv->swr_clk_users <= 0) {
-			dev_err_ratelimited(tx_priv->dev,
-				"tx swrm clock users already 0\n");
-			tx_priv->swr_clk_users = 0;
-			return 0;
-		}
-		clk_tx_ret = bolero_clk_rsc_request_clock(tx_priv->dev,
-						   TX_CORE_CLK,
-						   TX_CORE_CLK,
-						   true);
-		tx_priv->swr_clk_users--;
-		if (tx_priv->swr_clk_users == 0)
-			regmap_update_bits(regmap,
-				BOLERO_CDC_TX_CLK_RST_CTRL_SWR_CONTROL,
-				0x01, 0x00);
-		if (clk_type == TX_MCLK)
-			tx_macro_mclk_enable(tx_priv, 0);
-		if (clk_type == VA_MCLK) {
-			if (tx_priv->tx_mclk_users == 0) {
-				regmap_update_bits(regmap,
-			      BOLERO_CDC_TX_CLK_RST_CTRL_FS_CNT_CONTROL,
-					0x01, 0x00);
-				regmap_update_bits(regmap,
-				BOLERO_CDC_TX_CLK_RST_CTRL_MCLK_CONTROL,
-					0x01, 0x00);
-			}
-			bolero_clk_rsc_fs_gen_request(tx_priv->dev,
-						  false);
-			ret = bolero_clk_rsc_request_clock(tx_priv->dev,
-							   TX_CORE_CLK,
-							   VA_CORE_CLK,
-							   false);
-			if (ret < 0) {
-				dev_err_ratelimited(tx_priv->dev,
-					"%s: swr request clk failed\n",
-					__func__);
-				goto done;
-			}
-		}
-		if (!clk_tx_ret)
-			ret = bolero_clk_rsc_request_clock(tx_priv->dev,
-						   TX_CORE_CLK,
-						   TX_CORE_CLK,
-						   false);
-		if (tx_priv->swr_clk_users == 0) {
-			ret = msm_cdc_pinctrl_select_sleep_state(
-						tx_priv->tx_swr_gpio_p);
-			if (ret < 0) {
-				dev_err_ratelimited(tx_priv->dev,
-					"%s: tx swr pinctrl disable failed\n",
-					__func__);
-				goto exit;
-			}
-		}
+		break;
+	default:
+		break;
 	}
 	return 0;
-
-done:
-	if (!clk_tx_ret)
-		bolero_clk_rsc_request_clock(tx_priv->dev,
-				TX_CORE_CLK,
-				TX_CORE_CLK,
-				false);
-exit:
-	return ret;
 }
 
-static int tx_macro_clk_switch(struct snd_soc_codec *codec)
+static int rx_macro_mclk_enable(struct rx_macro_priv *rx_priv,
+				 bool mclk_enable, bool dapm)
 {
-	struct device *tx_dev = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
+	struct regmap *regmap = dev_get_regmap(rx_priv->dev->parent, NULL);
 	int ret = 0;
 
-	if (!codec)
+	if (regmap == NULL) {
+		dev_err(rx_priv->dev, "%s: regmap is NULL\n", __func__);
 		return -EINVAL;
-
-	tx_dev = bolero_get_device_ptr(codec->dev, TX_MACRO);
-	if (!tx_dev) {
-		dev_err(codec->dev,
-			"%s: null device for macro!\n", __func__);
-		return -EINVAL;
-	}
-	tx_priv = dev_get_drvdata(tx_dev);
-	if (!tx_priv) {
-		dev_err(codec->dev,
-			"%s: priv is null for macro!\n", __func__);
-		return -EINVAL;
-	}
-	if (tx_priv->swr_ctrl_data) {
-		ret = swrm_wcd_notify(
-			tx_priv->swr_ctrl_data[0].tx_swr_pdev,
-			SWR_REQ_CLK_SWITCH, NULL);
 	}
 
+	dev_dbg(rx_priv->dev, "%s: mclk_enable = %u, dapm = %d clk_users= %d\n",
+		__func__, mclk_enable, dapm, rx_priv->rx_mclk_users);
+
+	mutex_lock(&rx_priv->mclk_lock);
+	if (mclk_enable) {
+		if (rx_priv->rx_mclk_users == 0) {
+			if (rx_priv->is_native_on)
+				rx_priv->clk_id = RX_CORE_CLK;
+			ret = bolero_clk_rsc_request_clock(rx_priv->dev,
+							   rx_priv->default_clk_id,
+							   rx_priv->clk_id,
+							   true);
+			if (ret < 0) {
+				dev_err(rx_priv->dev,
+					"%s: rx request clock enable failed\n",
+					__func__);
+				goto exit;
+			}
+			bolero_clk_rsc_fs_gen_request(rx_priv->dev,
+							true);
+			regcache_mark_dirty(regmap);
+			regcache_sync_region(regmap,
+					RX_START_OFFSET,
+					RX_MAX_OFFSET);
+			regmap_update_bits(regmap,
+				BOLERO_CDC_RX_CLK_RST_CTRL_MCLK_CONTROL,
+				0x01, 0x01);
+			regmap_update_bits(regmap,
+				BOLERO_CDC_RX_CLK_RST_CTRL_MCLK_CONTROL,
+				0x02, 0x02);
+			regmap_update_bits(regmap,
+				BOLERO_CDC_RX_CLK_RST_CTRL_FS_CNT_CONTROL,
+				0x02, 0x00);
+			regmap_update_bits(regmap,
+				BOLERO_CDC_RX_CLK_RST_CTRL_FS_CNT_CONTROL,
+				0x01, 0x01);
+		}
+		rx_priv->rx_mclk_users++;
+	} else {
+		if (rx_priv->rx_mclk_users <= 0) {
+			dev_err(rx_priv->dev, "%s: clock already disabled\n",
+				__func__);
+			rx_priv->rx_mclk_users = 0;
+			goto exit;
+		}
+		rx_priv->rx_mclk_users--;
+		if (rx_priv->rx_mclk_users == 0) {
+			regmap_update_bits(regmap,
+				BOLERO_CDC_RX_CLK_RST_CTRL_FS_CNT_CONTROL,
+				0x01, 0x00);
+			regmap_update_bits(regmap,
+				BOLERO_CDC_RX_CLK_RST_CTRL_FS_CNT_CONTROL,
+				0x02, 0x02);
+			regmap_update_bits(regmap,
+				BOLERO_CDC_RX_CLK_RST_CTRL_MCLK_CONTROL,
+				0x02, 0x00);
+			regmap_update_bits(regmap,
+				BOLERO_CDC_RX_CLK_RST_CTRL_MCLK_CONTROL,
+				0x01, 0x00);
+			bolero_clk_rsc_fs_gen_request(rx_priv->dev,
+			   false);
+			bolero_clk_rsc_request_clock(rx_priv->dev,
+						 rx_priv->default_clk_id,
+						 rx_priv->clk_id,
+						 false);
+			rx_priv->clk_id = rx_priv->default_clk_id;
+		}
+	}
+exit:
+	trace_printk("%s: mclk_enable = %u, dapm = %d clk_users= %d\n",
+		__func__, mclk_enable, dapm, rx_priv->rx_mclk_users);
+	mutex_unlock(&rx_priv->mclk_lock);
 	return ret;
 }
 
-static int tx_macro_core_vote(void *handle, bool enable)
+static int rx_macro_mclk_event(struct snd_soc_dapm_widget *w,
+			       struct snd_kcontrol *kcontrol, int event)
 {
-	struct tx_macro_priv *tx_priv = (struct tx_macro_priv *) handle;
+	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
+	int ret = 0;
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+	int mclk_freq = MCLK_FREQ;
 
-	if (tx_priv == NULL) {
-		pr_err("%s: tx priv data is NULL\n", __func__);
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	dev_dbg(rx_dev, "%s: event = %d\n", __func__, event);
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		if (rx_priv->is_native_on)
+			mclk_freq = MCLK_FREQ_NATIVE;
+		if (rx_priv->swr_ctrl_data)
+			swrm_wcd_notify(
+				rx_priv->swr_ctrl_data[0].rx_swr_pdev,
+				SWR_CLK_FREQ, &mclk_freq);
+		ret = rx_macro_mclk_enable(rx_priv, 1, true);
+		if (ret)
+			rx_priv->dapm_mclk_enable = false;
+		else
+			rx_priv->dapm_mclk_enable = true;
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		if (rx_priv->dapm_mclk_enable)
+			ret = rx_macro_mclk_enable(rx_priv, 0, true);
+		break;
+	default:
+		dev_err(rx_priv->dev,
+			"%s: invalid DAPM event %d\n", __func__, event);
+		ret = -EINVAL;
+	}
+	return ret;
+}
+
+static int rx_macro_event_handler(struct snd_soc_codec *codec, u16 event,
+				  u32 data)
+{
+	u16 reg = 0, reg_mix = 0, rx_idx = 0, mute = 0x0, val = 0;
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+	int ret = 0;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	switch (event) {
+	case BOLERO_MACRO_EVT_RX_MUTE:
+		rx_idx = data >> 0x10;
+		mute = data & 0xffff;
+		val = mute ? 0x10 : 0x00;
+		reg = BOLERO_CDC_RX_RX0_RX_PATH_CTL + (rx_idx *
+					RX_MACRO_RX_PATH_OFFSET);
+		reg_mix = BOLERO_CDC_RX_RX0_RX_PATH_MIX_CTL + (rx_idx *
+					RX_MACRO_RX_PATH_OFFSET);
+		snd_soc_update_bits(codec, reg, 0x10, val);
+		snd_soc_update_bits(codec, reg_mix, 0x10, val);
+		break;
+	case BOLERO_MACRO_EVT_RX_COMPANDER_SOFT_RST:
+		rx_idx = data >> 0x10;
+		if (rx_idx == INTERP_AUX)
+			goto done;
+		reg = BOLERO_CDC_RX_COMPANDER0_CTL0 +
+				(rx_idx * RX_MACRO_COMP_OFFSET);
+		snd_soc_write(codec, reg,
+				snd_soc_read(codec, reg));
+		break;
+	case BOLERO_MACRO_EVT_IMPED_TRUE:
+		rx_macro_wcd_clsh_imped_config(codec, data, true);
+		break;
+	case BOLERO_MACRO_EVT_IMPED_FALSE:
+		rx_macro_wcd_clsh_imped_config(codec, data, false);
+		break;
+	case BOLERO_MACRO_EVT_SSR_DOWN:
+		trace_printk("%s, enter SSR down\n", __func__);
+		rx_priv->dev_up = false;
+		if (rx_priv->swr_ctrl_data) {
+			swrm_wcd_notify(
+				rx_priv->swr_ctrl_data[0].rx_swr_pdev,
+				SWR_DEVICE_SSR_DOWN, NULL);
+		}
+		if ((!pm_runtime_enabled(rx_dev) ||
+		     !pm_runtime_suspended(rx_dev))) {
+			ret = bolero_runtime_suspend(rx_dev);
+			if (!ret) {
+				pm_runtime_disable(rx_dev);
+				pm_runtime_set_suspended(rx_dev);
+				pm_runtime_enable(rx_dev);
+			}
+		}
+		break;
+	case BOLERO_MACRO_EVT_SSR_UP:
+		trace_printk("%s, enter SSR up\n", __func__);
+		rx_priv->dev_up = true;
+		/* reset swr after ssr/pdr */
+		rx_priv->reset_swr = true;
+		/* enable&disable RX_CORE_CLK to reset GFMUX reg */
+		ret = bolero_clk_rsc_request_clock(rx_priv->dev,
+						rx_priv->default_clk_id,
+						RX_CORE_CLK, true);
+		if (ret < 0)
+			dev_err_ratelimited(rx_priv->dev,
+				"%s, failed to enable clk, ret:%d\n",
+				__func__, ret);
+		else
+			bolero_clk_rsc_request_clock(rx_priv->dev,
+						rx_priv->default_clk_id,
+						RX_CORE_CLK, false);
+
+		if (rx_priv->swr_ctrl_data)
+			swrm_wcd_notify(
+				rx_priv->swr_ctrl_data[0].rx_swr_pdev,
+				SWR_DEVICE_SSR_UP, NULL);
+		break;
+	case BOLERO_MACRO_EVT_CLK_RESET:
+		bolero_rsc_clk_reset(rx_dev, RX_CORE_CLK);
+		break;
+	}
+done:
+	return ret;
+}
+
+static int rx_macro_find_playback_dai_id_for_port(int port_id,
+						  struct rx_macro_priv *rx_priv)
+{
+	int i = 0;
+
+	for (i = RX_MACRO_AIF1_PB; i < RX_MACRO_MAX_DAIS; i++) {
+		if (test_bit(port_id, &rx_priv->active_ch_mask[i]))
+			return i;
+	}
+
+	return -EINVAL;
+}
+
+static int rx_macro_set_idle_detect_thr(struct snd_soc_codec *codec,
+					struct rx_macro_priv *rx_priv,
+					int interp, int path_type)
+{
+	int port_id[4] = { 0, 0, 0, 0 };
+	int *port_ptr = NULL;
+	int num_ports = 0;
+	int bit_width = 0, i = 0;
+	int mux_reg = 0, mux_reg_val = 0;
+	int dai_id = 0, idle_thr = 0;
+
+	if ((interp != INTERP_HPHL) && (interp != INTERP_HPHR))
+		return 0;
+
+	if (!rx_priv->idle_det_cfg.hph_idle_detect_en)
+		return 0;
+
+	port_ptr = &port_id[0];
+	num_ports = 0;
+
+	/*
+	 * Read interpolator MUX input registers and find
+	 * which cdc_dma port is connected and store the port
+	 * numbers in port_id array.
+	 */
+	if (path_type == INTERP_MIX_PATH) {
+		mux_reg = BOLERO_CDC_RX_INP_MUX_RX_INT0_CFG1 +
+						2 * interp;
+		mux_reg_val = snd_soc_read(codec, mux_reg) & 0x0f;
+
+		if ((mux_reg_val >= INTn_2_INP_SEL_RX0) &&
+		   (mux_reg_val <= INTn_2_INP_SEL_RX5)) {
+			*port_ptr++ = mux_reg_val - 1;
+			num_ports++;
+		}
+	}
+
+	if (path_type == INTERP_MAIN_PATH) {
+		mux_reg = BOLERO_CDC_RX_INP_MUX_RX_INT1_CFG0 +
+			  2 * (interp - 1);
+		mux_reg_val = snd_soc_read(codec, mux_reg) & 0x0f;
+		i = RX_MACRO_INTERP_MUX_NUM_INPUTS;
+
+		while (i) {
+			if ((mux_reg_val >= INTn_1_INP_SEL_RX0) &&
+			    (mux_reg_val <= INTn_1_INP_SEL_RX5)) {
+				*port_ptr++ = mux_reg_val -
+					INTn_1_INP_SEL_RX0;
+				num_ports++;
+			}
+			mux_reg_val = (snd_soc_read(codec, mux_reg) &
+						    0xf0) >> 4;
+			mux_reg += 1;
+			i--;
+		}
+	}
+
+	dev_dbg(codec->dev, "%s: num_ports: %d, ports[%d %d %d %d]\n",
+		__func__, num_ports, port_id[0], port_id[1],
+		port_id[2], port_id[3]);
+
+	i = 0;
+	while (num_ports) {
+		dai_id = rx_macro_find_playback_dai_id_for_port(port_id[i++],
+								rx_priv);
+
+		if ((dai_id >= 0) && (dai_id < RX_MACRO_MAX_DAIS)) {
+			dev_dbg(codec->dev, "%s: dai_id: %d bit_width: %d\n",
+				__func__, dai_id,
+				rx_priv->bit_width[dai_id]);
+
+			if (rx_priv->bit_width[dai_id] > bit_width)
+				bit_width = rx_priv->bit_width[dai_id];
+		}
+		num_ports--;
+	}
+
+	switch (bit_width) {
+	case 16:
+		idle_thr = 0xff; /* F16 */
+		break;
+	case 24:
+	case 32:
+		idle_thr = 0x03; /* F22 */
+		break;
+	default:
+		idle_thr = 0x00;
+		break;
+	}
+
+	dev_dbg(codec->dev, "%s: (new) idle_thr: %d, (cur) idle_thr: %d\n",
+		__func__, idle_thr, rx_priv->idle_det_cfg.hph_idle_thr);
+
+	if ((rx_priv->idle_det_cfg.hph_idle_thr == 0) ||
+	    (idle_thr < rx_priv->idle_det_cfg.hph_idle_thr)) {
+		snd_soc_write(codec, BOLERO_CDC_RX_IDLE_DETECT_CFG3, idle_thr);
+		rx_priv->idle_det_cfg.hph_idle_thr = idle_thr;
+	}
+
+	return 0;
+}
+
+static int rx_macro_enable_mix_path(struct snd_soc_dapm_widget *w,
+		struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
+	u16 gain_reg = 0, mix_reg = 0;
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	if (w->shift >= INTERP_MAX) {
+		dev_err(codec->dev, "%s: Invalid Interpolator value %d for name %s\n",
+			__func__, w->shift, w->name);
+		return -EINVAL;
+	}
+
+	gain_reg = BOLERO_CDC_RX_RX0_RX_VOL_MIX_CTL +
+				(w->shift * RX_MACRO_RX_PATH_OFFSET);
+	mix_reg = BOLERO_CDC_RX_RX0_RX_PATH_MIX_CTL +
+				(w->shift * RX_MACRO_RX_PATH_OFFSET);
+
+	dev_dbg(codec->dev, "%s %d %s\n", __func__, event, w->name);
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		rx_macro_set_idle_detect_thr(codec, rx_priv, w->shift,
+					INTERP_MIX_PATH);
+		rx_macro_enable_interp_clk(codec, event, w->shift);
+		break;
+	case SND_SOC_DAPM_POST_PMU:
+		snd_soc_write(codec, gain_reg,
+			snd_soc_read(codec, gain_reg));
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		/* Clk Disable */
+		snd_soc_update_bits(codec, mix_reg, 0x20, 0x00);
+		rx_macro_enable_interp_clk(codec, event, w->shift);
+		/* Reset enable and disable */
+		snd_soc_update_bits(codec, mix_reg, 0x40, 0x40);
+		snd_soc_update_bits(codec, mix_reg, 0x40, 0x00);
+		break;
+	}
+
+	return 0;
+}
+
+static bool rx_macro_adie_lb(struct snd_soc_codec *codec,
+			     int interp_idx)
+{
+	u16 int_mux_cfg0 = 0, int_mux_cfg1 = 0;
+	u8 int_mux_cfg0_val = 0, int_mux_cfg1_val = 0;
+	u8 int_n_inp0 = 0, int_n_inp1 = 0, int_n_inp2 = 0;
+
+	int_mux_cfg0 = BOLERO_CDC_RX_INP_MUX_RX_INT0_CFG0 + interp_idx * 8;
+	int_mux_cfg1 = int_mux_cfg0 + 4;
+	int_mux_cfg0_val = snd_soc_read(codec, int_mux_cfg0);
+	int_mux_cfg1_val = snd_soc_read(codec, int_mux_cfg1);
+
+	int_n_inp0 = int_mux_cfg0_val & 0x0F;
+	if (int_n_inp0 == INTn_1_INP_SEL_DEC0 ||
+		int_n_inp0 == INTn_1_INP_SEL_DEC1 ||
+		int_n_inp0 == INTn_1_INP_SEL_IIR0 ||
+		int_n_inp0 == INTn_1_INP_SEL_IIR1)
+		return true;
+
+	int_n_inp1 = int_mux_cfg0_val >> 4;
+	if (int_n_inp1 == INTn_1_INP_SEL_DEC0 ||
+		int_n_inp1 == INTn_1_INP_SEL_DEC1 ||
+		int_n_inp1 == INTn_1_INP_SEL_IIR0 ||
+		int_n_inp1 == INTn_1_INP_SEL_IIR1)
+		return true;
+
+	int_n_inp2 = int_mux_cfg1_val >> 4;
+	if (int_n_inp2 == INTn_1_INP_SEL_DEC0 ||
+		int_n_inp2 == INTn_1_INP_SEL_DEC1 ||
+		int_n_inp2 == INTn_1_INP_SEL_IIR0 ||
+		int_n_inp2 == INTn_1_INP_SEL_IIR1)
+		return true;
+
+	return false;
+}
+
+static int rx_macro_enable_main_path(struct snd_soc_dapm_widget *w,
+					struct snd_kcontrol *kcontrol,
+					int event)
+{
+	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
+	u16 gain_reg = 0;
+	u16 reg = 0;
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	dev_dbg(codec->dev, "%s %d %s\n", __func__, event, w->name);
+
+	if (w->shift >= INTERP_MAX) {
+		dev_err(codec->dev, "%s: Invalid Interpolator value %d for name %s\n",
+			__func__, w->shift, w->name);
+		return -EINVAL;
+	}
+
+	reg = BOLERO_CDC_RX_RX0_RX_PATH_CTL + (w->shift *
+						RX_MACRO_RX_PATH_OFFSET);
+	gain_reg = BOLERO_CDC_RX_RX0_RX_VOL_CTL + (w->shift *
+						RX_MACRO_RX_PATH_OFFSET);
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		rx_macro_set_idle_detect_thr(codec, rx_priv, w->shift,
+						INTERP_MAIN_PATH);
+		rx_macro_enable_interp_clk(codec, event, w->shift);
+		if (rx_macro_adie_lb(codec, w->shift))
+			snd_soc_update_bits(codec,
+						reg, 0x20, 0x20);
+		break;
+	case SND_SOC_DAPM_POST_PMU:
+		snd_soc_write(codec, gain_reg,
+			snd_soc_read(codec, gain_reg));
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		rx_macro_enable_interp_clk(codec, event, w->shift);
+		break;
+	}
+
+	return 0;
+}
+
+static int rx_macro_config_compander(struct snd_soc_codec *codec,
+				struct rx_macro_priv *rx_priv,
+				int interp_n, int event)
+{
+	int comp = 0;
+	u16 comp_ctl0_reg = 0, rx_path_cfg0_reg = 0, rx_path_cfg3_reg = 0;
+	u16 rx0_path_ctl_reg = 0;
+	u8 pcm_rate = 0, val = 0;
+
+	/* AUX does not have compander */
+	if (interp_n == INTERP_AUX)
+		return 0;
+
+	comp = interp_n;
+	dev_dbg(codec->dev, "%s: event %d compander %d, enabled %d\n",
+		__func__, event, comp + 1, rx_priv->comp_enabled[comp]);
+
+	if (!rx_priv->comp_enabled[comp])
+		return 0;
+
+	comp_ctl0_reg = BOLERO_CDC_RX_COMPANDER0_CTL0 +
+					(comp * RX_MACRO_COMP_OFFSET);
+	rx_path_cfg0_reg = BOLERO_CDC_RX_RX0_RX_PATH_CFG0 +
+					(comp * RX_MACRO_RX_PATH_OFFSET);
+	rx_path_cfg3_reg = BOLERO_CDC_RX_RX0_RX_PATH_CFG3 +
+					(comp * RX_MACRO_RX_PATH_OFFSET);
+	rx0_path_ctl_reg = BOLERO_CDC_RX_RX0_RX_PATH_CTL +
+					(comp * RX_MACRO_RX_PATH_OFFSET);
+	pcm_rate = (snd_soc_read(codec, rx0_path_ctl_reg)
+						& 0x0F);
+	if (pcm_rate < 0x06)
+		val = 0x03;
+	else if (pcm_rate < 0x08)
+		val = 0x01;
+	else if (pcm_rate < 0x0B)
+		val = 0x02;
+	else
+		val = 0x00;
+
+	if (SND_SOC_DAPM_EVENT_ON(event)) {
+		/* Enable Compander Clock */
+		snd_soc_update_bits(codec, comp_ctl0_reg, 0x01, 0x01);
+		snd_soc_update_bits(codec, comp_ctl0_reg, 0x02, 0x02);
+		snd_soc_update_bits(codec, comp_ctl0_reg, 0x02, 0x00);
+		snd_soc_update_bits(codec, rx_path_cfg0_reg, 0x02, 0x02);
+		snd_soc_update_bits(codec, rx_path_cfg3_reg, 0x03, val);
+	}
+
+	if (SND_SOC_DAPM_EVENT_OFF(event)) {
+		snd_soc_update_bits(codec, comp_ctl0_reg, 0x04, 0x04);
+		snd_soc_update_bits(codec, rx_path_cfg0_reg, 0x02, 0x00);
+		snd_soc_update_bits(codec, comp_ctl0_reg, 0x01, 0x00);
+		snd_soc_update_bits(codec, comp_ctl0_reg, 0x04, 0x00);
+		snd_soc_update_bits(codec, rx_path_cfg3_reg,
+					0x03, 0x03);
+	}
+
+	return 0;
+}
+
+static int rx_macro_load_compander_coeff(struct snd_soc_codec *codec,
+					 struct rx_macro_priv *rx_priv,
+					 int interp_n, int event)
+{
+	int comp = 0;
+	u16 comp_coeff_lsb_reg = 0, comp_coeff_msb_reg = 0;
+	int i = 0;
+	int hph_pwr_mode = HPH_LOHIFI;
+
+	if (!rx_priv->comp_enabled[comp])
+		return 0;
+
+	if (interp_n == INTERP_HPHL) {
+		comp_coeff_lsb_reg = BOLERO_CDC_RX_TOP_HPHL_COMP_WR_LSB;
+		comp_coeff_msb_reg = BOLERO_CDC_RX_TOP_HPHL_COMP_WR_MSB;
+	} else if (interp_n == INTERP_HPHR) {
+		comp_coeff_lsb_reg = BOLERO_CDC_RX_TOP_HPHR_COMP_WR_LSB;
+		comp_coeff_msb_reg = BOLERO_CDC_RX_TOP_HPHR_COMP_WR_MSB;
+	} else {
+		/* compander coefficients are loaded only for hph path */
+		return 0;
+	}
+
+	comp = interp_n;
+	hph_pwr_mode = rx_priv->hph_pwr_mode;
+	dev_dbg(codec->dev, "%s: event %d compander %d, enabled %d\n",
+		__func__, event, comp + 1, rx_priv->comp_enabled[comp]);
+
+	if (SND_SOC_DAPM_EVENT_ON(event)) {
+		/* Load Compander Coeff */
+		for (i = 0; i < COMP_MAX_COEFF; i++) {
+			snd_soc_write(codec, comp_coeff_lsb_reg,
+					comp_coeff_table[hph_pwr_mode][i].lsb);
+			snd_soc_write(codec, comp_coeff_msb_reg,
+					comp_coeff_table[hph_pwr_mode][i].msb);
+		}
+	}
+
+	return 0;
+}
+
+static void rx_macro_enable_softclip_clk(struct snd_soc_codec *codec,
+					 struct rx_macro_priv *rx_priv,
+					 bool enable)
+{
+	if (enable) {
+		if (rx_priv->softclip_clk_users == 0)
+			snd_soc_update_bits(codec,
+				BOLERO_CDC_RX_SOFTCLIP_CRC,
+				0x01, 0x01);
+		rx_priv->softclip_clk_users++;
+	} else {
+		rx_priv->softclip_clk_users--;
+		if (rx_priv->softclip_clk_users == 0)
+			snd_soc_update_bits(codec,
+				BOLERO_CDC_RX_SOFTCLIP_CRC,
+				0x01, 0x00);
+	}
+}
+
+static int rx_macro_config_softclip(struct snd_soc_codec *codec,
+				struct rx_macro_priv *rx_priv,
+				int event)
+{
+	dev_dbg(codec->dev, "%s: event %d, enabled %d\n",
+		__func__, event, rx_priv->is_softclip_on);
+
+	if (!rx_priv->is_softclip_on)
+		return 0;
+
+	if (SND_SOC_DAPM_EVENT_ON(event)) {
+		/* Enable Softclip clock */
+		rx_macro_enable_softclip_clk(codec, rx_priv, true);
+		/* Enable Softclip control */
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_SOFTCLIP_SOFTCLIP_CTRL, 0x01, 0x01);
+	}
+
+	if (SND_SOC_DAPM_EVENT_OFF(event)) {
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_SOFTCLIP_SOFTCLIP_CTRL, 0x01, 0x00);
+		rx_macro_enable_softclip_clk(codec, rx_priv, false);
+	}
+
+	return 0;
+}
+
+static int rx_macro_config_aux_hpf(struct snd_soc_codec *codec,
+				struct rx_macro_priv *rx_priv,
+				int event)
+{
+	dev_dbg(codec->dev, "%s: event %d, enabled %d\n",
+		__func__, event, rx_priv->is_aux_hpf_on);
+
+	if (SND_SOC_DAPM_EVENT_ON(event)) {
+		/* Update Aux HPF control */
+		if (!rx_priv->is_aux_hpf_on)
+			snd_soc_update_bits(codec,
+				BOLERO_CDC_RX_RX2_RX_PATH_CFG1, 0x04, 0x00);
+	}
+
+	if (SND_SOC_DAPM_EVENT_OFF(event)) {
+		/* Reset to default (HPF=ON) */
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_RX2_RX_PATH_CFG1, 0x04, 0x04);
+	}
+
+	return 0;
+}
+
+
+static inline void
+rx_macro_enable_clsh_block(struct rx_macro_priv *rx_priv, bool enable)
+{
+	if ((enable && ++rx_priv->clsh_users == 1) ||
+	    (!enable && --rx_priv->clsh_users == 0))
+		snd_soc_update_bits(rx_priv->codec,
+				BOLERO_CDC_RX_CLSH_CRC, 0x01,
+				(u8) enable);
+	if (rx_priv->clsh_users < 0)
+		rx_priv->clsh_users = 0;
+	dev_dbg(rx_priv->dev, "%s: clsh_users %d, enable %d", __func__,
+		rx_priv->clsh_users, enable);
+}
+
+static int rx_macro_config_classh(struct snd_soc_codec *codec,
+				struct rx_macro_priv *rx_priv,
+				int interp_n, int event)
+{
+	if (SND_SOC_DAPM_EVENT_OFF(event)) {
+		rx_macro_enable_clsh_block(rx_priv, false);
+		return 0;
+	}
+
+	if (!SND_SOC_DAPM_EVENT_ON(event))
+		return 0;
+
+	rx_macro_enable_clsh_block(rx_priv, true);
+	if (interp_n == INTERP_HPHL ||
+		interp_n == INTERP_HPHR) {
+		/*
+		 * These K1 values depend on the Headphone Impedance
+		 * For now it is assumed to be 16 ohm
+		 */
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_CLSH_K1_LSB,
+				    0xFF, 0xC0);
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_CLSH_K1_MSB,
+				    0x0F, 0x00);
+	}
+	switch (interp_n) {
+	case INTERP_HPHL:
+		if (rx_priv->is_ear_mode_on)
+			snd_soc_update_bits(codec,
+				BOLERO_CDC_RX_CLSH_HPH_V_PA,
+				0x3F, 0x39);
+		else
+			snd_soc_update_bits(codec,
+				BOLERO_CDC_RX_CLSH_HPH_V_PA,
+				0x3F, 0x1C);
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_CLSH_DECAY_CTRL,
+				0x07, 0x00);
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_RX0_RX_PATH_CFG0,
+				0x40, 0x40);
+		break;
+	case INTERP_HPHR:
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_CLSH_HPH_V_PA,
+				0x3F, 0x1C);
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_CLSH_DECAY_CTRL,
+				0x07, 0x00);
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_RX1_RX_PATH_CFG0,
+				0x40, 0x40);
+		break;
+	case INTERP_AUX:
+		snd_soc_update_bits(codec,
+				BOLERO_CDC_RX_RX2_RX_PATH_CFG0,
+				0x08, 0x08);
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_RX2_RX_PATH_CFG0,
+				0x10, 0x10);
+		break;
+	}
+
+	return 0;
+}
+
+static void rx_macro_hd2_control(struct snd_soc_codec *codec,
+				 u16 interp_idx, int event)
+{
+	u16 hd2_scale_reg = 0;
+	u16 hd2_enable_reg = 0;
+
+	switch (interp_idx) {
+	case INTERP_HPHL:
+		hd2_scale_reg = BOLERO_CDC_RX_RX0_RX_PATH_SEC3;
+		hd2_enable_reg = BOLERO_CDC_RX_RX0_RX_PATH_CFG0;
+		break;
+	case INTERP_HPHR:
+		hd2_scale_reg = BOLERO_CDC_RX_RX1_RX_PATH_SEC3;
+		hd2_enable_reg = BOLERO_CDC_RX_RX1_RX_PATH_CFG0;
+		break;
+	}
+
+	if (hd2_enable_reg && SND_SOC_DAPM_EVENT_ON(event)) {
+		snd_soc_update_bits(codec, hd2_scale_reg, 0x3C, 0x14);
+		snd_soc_update_bits(codec, hd2_enable_reg, 0x04, 0x04);
+	}
+
+	if (hd2_enable_reg && SND_SOC_DAPM_EVENT_OFF(event)) {
+		snd_soc_update_bits(codec, hd2_enable_reg, 0x04, 0x00);
+		snd_soc_update_bits(codec, hd2_scale_reg, 0x3C, 0x00);
+	}
+}
+
+static int rx_macro_hph_idle_detect_get(struct snd_kcontrol *kcontrol,
+					struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct rx_macro_priv *rx_priv = NULL;
+	struct device *rx_dev = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	ucontrol->value.integer.value[0] =
+		rx_priv->idle_det_cfg.hph_idle_detect_en;
+
+	return 0;
+}
+
+static int rx_macro_hph_idle_detect_put(struct snd_kcontrol *kcontrol,
+					struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct rx_macro_priv *rx_priv = NULL;
+	struct device *rx_dev = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	rx_priv->idle_det_cfg.hph_idle_detect_en =
+		ucontrol->value.integer.value[0];
+
+	return 0;
+}
+
+static int rx_macro_get_compander(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	int comp = ((struct soc_multi_mixer_control *)
+		    kcontrol->private_value)->shift;
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	ucontrol->value.integer.value[0] = rx_priv->comp_enabled[comp];
+	return 0;
+}
+
+static int rx_macro_set_compander(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	int comp = ((struct soc_multi_mixer_control *)
+		    kcontrol->private_value)->shift;
+	int value = ucontrol->value.integer.value[0];
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	dev_dbg(codec->dev, "%s: Compander %d enable current %d, new %d\n",
+		__func__, comp + 1, rx_priv->comp_enabled[comp], value);
+	rx_priv->comp_enabled[comp] = value;
+
+	return 0;
+}
+
+static int rx_macro_mux_get(struct snd_kcontrol *kcontrol,
+			  struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_dapm_widget *widget =
+		snd_soc_dapm_kcontrol_widget(kcontrol);
+	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(widget->dapm);
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	ucontrol->value.integer.value[0] =
+			rx_priv->rx_port_value[widget->shift];
+	return 0;
+}
+
+static int rx_macro_mux_put(struct snd_kcontrol *kcontrol,
+			  struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_dapm_widget *widget =
+		snd_soc_dapm_kcontrol_widget(kcontrol);
+	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(widget->dapm);
+	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
+	struct snd_soc_dapm_update *update = NULL;
+	u32 rx_port_value = ucontrol->value.integer.value[0];
+	u32 aif_rst = 0;
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	aif_rst = rx_priv->rx_port_value[widget->shift];
+	if (!rx_port_value) {
+		if (aif_rst == 0) {
+			dev_err(rx_dev, "%s:AIF reset already\n", __func__);
+			return 0;
+		}
+		if (aif_rst > RX_MACRO_AIF4_PB) {
+			dev_err(rx_dev, "%s: Invalid AIF reset\n", __func__);
+			return 0;
+		}
+	}
+	rx_priv->rx_port_value[widget->shift] = rx_port_value;
+
+	dev_dbg(rx_dev, "%s: mux input: %d, mux output: %d, aif_rst: %d\n",
+		__func__, rx_port_value, widget->shift, aif_rst);
+
+	switch (rx_port_value) {
+	case 0:
+		if (rx_priv->active_ch_cnt[aif_rst]) {
+			clear_bit(widget->shift,
+				&rx_priv->active_ch_mask[aif_rst]);
+			rx_priv->active_ch_cnt[aif_rst]--;
+		}
+		break;
+	case 1:
+	case 2:
+	case 3:
+	case 4:
+		set_bit(widget->shift,
+			&rx_priv->active_ch_mask[rx_port_value]);
+		rx_priv->active_ch_cnt[rx_port_value]++;
+		break;
+	default:
+		dev_err(codec->dev,
+			"%s:Invalid AIF_ID for RX_MACRO MUX %d\n",
+			__func__, rx_port_value);
+		goto err;
+	}
+
+	snd_soc_dapm_mux_update_power(widget->dapm, kcontrol,
+					rx_port_value, e, update);
+	return 0;
+err:
+	return -EINVAL;
+}
+
+static int rx_macro_get_ear_mode(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	ucontrol->value.integer.value[0] = rx_priv->is_ear_mode_on;
+	return 0;
+}
+
+static int rx_macro_put_ear_mode(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	rx_priv->is_ear_mode_on =
+			(!ucontrol->value.integer.value[0] ? false : true);
+	return 0;
+}
+
+static int rx_macro_get_hph_hd2_mode(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	ucontrol->value.integer.value[0] = rx_priv->hph_hd2_mode;
+	return 0;
+}
+
+static int rx_macro_put_hph_hd2_mode(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	rx_priv->hph_hd2_mode = ucontrol->value.integer.value[0];
+	return 0;
+}
+
+static int rx_macro_get_hph_pwr_mode(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	ucontrol->value.integer.value[0] = rx_priv->hph_pwr_mode;
+	return 0;
+}
+
+static int rx_macro_put_hph_pwr_mode(struct snd_kcontrol *kcontrol,
+			       struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	rx_priv->hph_pwr_mode = ucontrol->value.integer.value[0];
+	return 0;
+}
+
+static int rx_macro_vbat_bcl_gsm_mode_func_get(struct snd_kcontrol *kcontrol,
+	struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+
+	ucontrol->value.integer.value[0] =
+		((snd_soc_read(codec, BOLERO_CDC_RX_BCL_VBAT_CFG) & 0x04) ?
+		  1 : 0);
+
+	dev_dbg(codec->dev, "%s: value: %lu\n", __func__,
+		ucontrol->value.integer.value[0]);
+
+	return 0;
+}
+
+static int rx_macro_vbat_bcl_gsm_mode_func_put(struct snd_kcontrol *kcontrol,
+					struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+
+	dev_dbg(codec->dev, "%s: value: %lu\n", __func__,
+		ucontrol->value.integer.value[0]);
+
+	/* Set Vbat register configuration for GSM mode bit based on value */
+	if (ucontrol->value.integer.value[0])
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_BCL_VBAT_CFG,
+						0x04, 0x04);
+	else
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_BCL_VBAT_CFG,
+						0x04, 0x00);
+
+	return 0;
+}
+
+static int rx_macro_soft_clip_enable_get(struct snd_kcontrol *kcontrol,
+					  struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	ucontrol->value.integer.value[0] = rx_priv->is_softclip_on;
+
+	dev_dbg(codec->dev, "%s: ucontrol->value.integer.value[0] = %ld\n",
+		__func__, ucontrol->value.integer.value[0]);
+
+	return 0;
+}
+
+static int rx_macro_soft_clip_enable_put(struct snd_kcontrol *kcontrol,
+					  struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	rx_priv->is_softclip_on = ucontrol->value.integer.value[0];
+
+	dev_dbg(codec->dev, "%s: soft clip enable = %d\n", __func__,
+		rx_priv->is_softclip_on);
+
+	return 0;
+}
+
+static int rx_macro_aux_hpf_mode_get(struct snd_kcontrol *kcontrol,
+					  struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec =
+			snd_soc_kcontrol_codec(kcontrol);
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	ucontrol->value.integer.value[0] = rx_priv->is_aux_hpf_on;
+
+	dev_dbg(codec->dev, "%s: ucontrol->value.integer.value[0] = %ld\n",
+		__func__, ucontrol->value.integer.value[0]);
+
+	return 0;
+}
+
+static int rx_macro_aux_hpf_mode_put(struct snd_kcontrol *kcontrol,
+					  struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec =
+			snd_soc_kcontrol_codec(kcontrol);
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	rx_priv->is_aux_hpf_on = ucontrol->value.integer.value[0];
+
+	dev_dbg(codec->dev, "%s: aux hpf enable = %d\n", __func__,
+		rx_priv->is_aux_hpf_on);
+
+	return 0;
+}
+
+
+static int rx_macro_enable_vbat(struct snd_soc_dapm_widget *w,
+				 struct snd_kcontrol *kcontrol,
+				 int event)
+{
+	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	dev_dbg(codec->dev, "%s %s %d\n", __func__, w->name, event);
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		/* Enable clock for VBAT block */
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_PATH_CTL, 0x10, 0x10);
+		/* Enable VBAT block */
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_CFG, 0x01, 0x01);
+		/* Update interpolator with 384K path */
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_RX2_RX_PATH_CFG1,
+					0x80, 0x80);
+		/* Update DSM FS rate */
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_RX2_RX_PATH_SEC7,
+					0x02, 0x02);
+		/* Use attenuation mode */
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_BCL_VBAT_CFG,
+					0x02, 0x00);
+		/* BCL block needs softclip clock to be enabled */
+		rx_macro_enable_softclip_clk(codec, rx_priv, true);
+		/* Enable VBAT at channel level */
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_RX2_RX_PATH_CFG1,
+					0x02, 0x02);
+		/* Set the ATTK1 gain */
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_BCL_GAIN_UPD1,
+			0xFF, 0xFF);
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_BCL_GAIN_UPD2,
+			0xFF, 0x03);
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_BCL_GAIN_UPD3,
+			0xFF, 0x00);
+		/* Set the ATTK2 gain */
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_BCL_GAIN_UPD4,
+			0xFF, 0xFF);
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_BCL_GAIN_UPD5,
+			0xFF, 0x03);
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_BCL_GAIN_UPD6,
+			0xFF, 0x00);
+		/* Set the ATTK3 gain */
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_BCL_GAIN_UPD7,
+			0xFF, 0xFF);
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_BCL_GAIN_UPD8,
+			0xFF, 0x03);
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_BCL_GAIN_UPD9,
+			0xFF, 0x00);
+		break;
+
+	case SND_SOC_DAPM_POST_PMD:
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_RX2_RX_PATH_CFG1,
+					0x80, 0x00);
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_RX2_RX_PATH_SEC7,
+					0x02, 0x00);
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_BCL_VBAT_CFG,
+					0x02, 0x02);
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_RX2_RX_PATH_CFG1,
+					0x02, 0x00);
+		snd_soc_update_bits(codec,
+				BOLERO_CDC_RX_BCL_VBAT_BCL_GAIN_UPD1,
+				0xFF, 0x00);
+		snd_soc_update_bits(codec,
+				BOLERO_CDC_RX_BCL_VBAT_BCL_GAIN_UPD2,
+				0xFF, 0x00);
+		snd_soc_update_bits(codec,
+				BOLERO_CDC_RX_BCL_VBAT_BCL_GAIN_UPD3,
+				0xFF, 0x00);
+		snd_soc_update_bits(codec,
+				BOLERO_CDC_RX_BCL_VBAT_BCL_GAIN_UPD4,
+				0xFF, 0x00);
+		snd_soc_update_bits(codec,
+				BOLERO_CDC_RX_BCL_VBAT_BCL_GAIN_UPD5,
+				0xFF, 0x00);
+		snd_soc_update_bits(codec,
+				BOLERO_CDC_RX_BCL_VBAT_BCL_GAIN_UPD6,
+				0xFF, 0x00);
+		snd_soc_update_bits(codec,
+				BOLERO_CDC_RX_BCL_VBAT_BCL_GAIN_UPD7,
+				0xFF, 0x00);
+		snd_soc_update_bits(codec,
+				BOLERO_CDC_RX_BCL_VBAT_BCL_GAIN_UPD8,
+				0xFF, 0x00);
+		snd_soc_update_bits(codec,
+				BOLERO_CDC_RX_BCL_VBAT_BCL_GAIN_UPD9,
+				0xFF, 0x00);
+		rx_macro_enable_softclip_clk(codec, rx_priv, false);
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_CFG, 0x01, 0x00);
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_PATH_CTL, 0x10, 0x00);
+		break;
+	default:
+		dev_err(rx_dev, "%s: Invalid event %d\n", __func__, event);
+		break;
+	}
+	return 0;
+}
+
+static void rx_macro_idle_detect_control(struct snd_soc_codec *codec,
+					 struct rx_macro_priv *rx_priv,
+					 int interp, int event)
+{
+	int reg = 0, mask = 0, val = 0;
+
+	if (!rx_priv->idle_det_cfg.hph_idle_detect_en)
+		return;
+
+	if (interp == INTERP_HPHL) {
+		reg = BOLERO_CDC_RX_IDLE_DETECT_PATH_CTL;
+		mask = 0x01;
+		val = 0x01;
+	}
+	if (interp == INTERP_HPHR) {
+		reg = BOLERO_CDC_RX_IDLE_DETECT_PATH_CTL;
+		mask = 0x02;
+		val = 0x02;
+	}
+
+	if (reg && SND_SOC_DAPM_EVENT_ON(event))
+		snd_soc_update_bits(codec, reg, mask, val);
+
+	if (reg && SND_SOC_DAPM_EVENT_OFF(event)) {
+		snd_soc_update_bits(codec, reg, mask, 0x00);
+		rx_priv->idle_det_cfg.hph_idle_thr = 0;
+		snd_soc_write(codec, BOLERO_CDC_RX_IDLE_DETECT_CFG3, 0x0);
+	}
+}
+
+static void rx_macro_hphdelay_lutbypass(struct snd_soc_codec *codec,
+					struct rx_macro_priv *rx_priv,
+					u16 interp_idx, int event)
+{
+	u16 hph_lut_bypass_reg = 0;
+	u16 hph_comp_ctrl7 = 0;
+
+	switch (interp_idx) {
+	case INTERP_HPHL:
+		hph_lut_bypass_reg = BOLERO_CDC_RX_TOP_HPHL_COMP_LUT;
+		hph_comp_ctrl7 = BOLERO_CDC_RX_COMPANDER0_CTL7;
+		break;
+	case INTERP_HPHR:
+		hph_lut_bypass_reg = BOLERO_CDC_RX_TOP_HPHR_COMP_LUT;
+		hph_comp_ctrl7 = BOLERO_CDC_RX_COMPANDER1_CTL7;
+		break;
+	default:
+		break;
+	}
+
+	if (hph_lut_bypass_reg && SND_SOC_DAPM_EVENT_ON(event)) {
+		if (interp_idx == INTERP_HPHL) {
+			if (rx_priv->is_ear_mode_on)
+				snd_soc_update_bits(codec,
+					BOLERO_CDC_RX_RX0_RX_PATH_CFG1,
+					0x02, 0x02);
+			else
+				snd_soc_update_bits(codec,
+					hph_lut_bypass_reg,
+					0x80, 0x80);
+		} else {
+			snd_soc_update_bits(codec,
+					hph_lut_bypass_reg,
+					0x80, 0x80);
+		}
+		if (rx_priv->hph_pwr_mode)
+			snd_soc_update_bits(codec, hph_comp_ctrl7, 0x20, 0x00);
+	}
+
+	if (hph_lut_bypass_reg && SND_SOC_DAPM_EVENT_OFF(event)) {
+		snd_soc_update_bits(codec, BOLERO_CDC_RX_RX0_RX_PATH_CFG1,
+					0x02, 0x00);
+		snd_soc_update_bits(codec, hph_lut_bypass_reg, 0x80, 0x00);
+		snd_soc_update_bits(codec, hph_comp_ctrl7, 0x20, 0x20);
+	}
+}
+
+static int rx_macro_enable_interp_clk(struct snd_soc_codec *codec,
+				      int event, int interp_idx)
+{
+	u16 main_reg = 0, dsm_reg = 0, rx_cfg2_reg = 0;
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!codec) {
+		pr_err("%s: codec is NULL\n", __func__);
+		return -EINVAL;
+	}
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	main_reg = BOLERO_CDC_RX_RX0_RX_PATH_CTL +
+			(interp_idx * RX_MACRO_RX_PATH_OFFSET);
+	dsm_reg = BOLERO_CDC_RX_RX0_RX_PATH_DSM_CTL +
+			(interp_idx * RX_MACRO_RX_PATH_OFFSET);
+	if (interp_idx == INTERP_AUX)
+		dsm_reg = BOLERO_CDC_RX_RX2_RX_PATH_DSM_CTL;
+	rx_cfg2_reg = BOLERO_CDC_RX_RX0_RX_PATH_CFG2 +
+			(interp_idx * RX_MACRO_RX_PATH_OFFSET);
+
+	if (SND_SOC_DAPM_EVENT_ON(event)) {
+		if (rx_priv->main_clk_users[interp_idx] == 0) {
+			/* Main path PGA mute enable */
+			snd_soc_update_bits(codec, main_reg, 0x10, 0x10);
+			snd_soc_update_bits(codec, dsm_reg, 0x01, 0x01);
+			snd_soc_update_bits(codec, rx_cfg2_reg, 0x03, 0x03);
+			rx_macro_load_compander_coeff(codec, rx_priv,
+						      interp_idx, event);
+			rx_macro_idle_detect_control(codec, rx_priv,
+					interp_idx, event);
+			if (rx_priv->hph_hd2_mode)
+				rx_macro_hd2_control(codec, interp_idx, event);
+			rx_macro_hphdelay_lutbypass(codec, rx_priv, interp_idx,
+						       event);
+			rx_macro_config_compander(codec, rx_priv,
+						interp_idx, event);
+			if (interp_idx ==  INTERP_AUX) {
+				rx_macro_config_softclip(codec, rx_priv,
+							event);
+				rx_macro_config_aux_hpf(codec, rx_priv,
+							event);
+			}
+			rx_macro_config_classh(codec, rx_priv,
+						interp_idx, event);
+		}
+		rx_priv->main_clk_users[interp_idx]++;
+	}
+
+	if (SND_SOC_DAPM_EVENT_OFF(event)) {
+		rx_priv->main_clk_users[interp_idx]--;
+		if (rx_priv->main_clk_users[interp_idx] <= 0) {
+			rx_priv->main_clk_users[interp_idx] = 0;
+			/* Main path PGA mute enable */
+			snd_soc_update_bits(codec, main_reg,
+					0x10, 0x10);
+			/* Clk Disable */
+			snd_soc_update_bits(codec, dsm_reg, 0x01, 0x00);
+			snd_soc_update_bits(codec, main_reg, 0x20, 0x00);
+			/* Reset enable and disable */
+			snd_soc_update_bits(codec, main_reg, 0x40, 0x40);
+			snd_soc_update_bits(codec, main_reg, 0x40, 0x00);
+			/* Reset rate to 48K*/
+			snd_soc_update_bits(codec, main_reg, 0x0F, 0x04);
+			snd_soc_update_bits(codec, rx_cfg2_reg, 0x03, 0x00);
+			rx_macro_config_classh(codec, rx_priv,
+						interp_idx, event);
+			rx_macro_config_compander(codec, rx_priv,
+						interp_idx, event);
+			if (interp_idx ==  INTERP_AUX) {
+				rx_macro_config_softclip(codec, rx_priv,
+							event);
+				rx_macro_config_aux_hpf(codec, rx_priv,
+							event);
+			}
+			rx_macro_hphdelay_lutbypass(codec, rx_priv, interp_idx,
+						       event);
+			if (rx_priv->hph_hd2_mode)
+				rx_macro_hd2_control(codec, interp_idx, event);
+			rx_macro_idle_detect_control(codec, rx_priv,
+					interp_idx, event);
+		}
+	}
+
+	dev_dbg(codec->dev, "%s event %d main_clk_users %d\n",
+		__func__,  event, rx_priv->main_clk_users[interp_idx]);
+
+	return rx_priv->main_clk_users[interp_idx];
+}
+
+static int rx_macro_enable_rx_path_clk(struct snd_soc_dapm_widget *w,
+				  struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
+	u16 sidetone_reg = 0, fs_reg = 0;
+
+	dev_dbg(codec->dev, "%s %d %d\n", __func__, event, w->shift);
+	sidetone_reg = BOLERO_CDC_RX_RX0_RX_PATH_CFG1 +
+			RX_MACRO_RX_PATH_OFFSET * (w->shift);
+	fs_reg = BOLERO_CDC_RX_RX0_RX_PATH_CTL +
+			RX_MACRO_RX_PATH_OFFSET * (w->shift);
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		rx_macro_enable_interp_clk(codec, event, w->shift);
+		snd_soc_update_bits(codec, sidetone_reg, 0x10, 0x10);
+		snd_soc_update_bits(codec, fs_reg,
+					0x20, 0x20);
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		snd_soc_update_bits(codec, sidetone_reg, 0x10, 0x00);
+		rx_macro_enable_interp_clk(codec, event, w->shift);
+		break;
+	default:
+		break;
+	};
+	return 0;
+}
+
+static void rx_macro_restore_iir_coeff(struct rx_macro_priv *rx_priv, int iir_idx,
+				int band_idx)
+{
+	u16 reg_add = 0, coeff_idx = 0, idx = 0;
+	struct regmap *regmap = dev_get_regmap(rx_priv->dev->parent, NULL);
+
+	if (regmap == NULL) {
+		dev_err(rx_priv->dev, "%s: regmap is NULL\n", __func__);
+		return;
+	}
+
+	regmap_write(regmap,
+		(BOLERO_CDC_RX_SIDETONE_IIR0_IIR_COEF_B1_CTL + 0x80 * iir_idx),
+		(band_idx * BAND_MAX * sizeof(uint32_t)) & 0x7F);
+
+	reg_add = BOLERO_CDC_RX_SIDETONE_IIR0_IIR_COEF_B2_CTL + 0x80 * iir_idx;
+
+	/* 5 coefficients per band and 4 writes per coefficient */
+	for (coeff_idx = 0; coeff_idx < RX_MACRO_SIDETONE_IIR_COEFF_MAX;
+		coeff_idx++) {
+		/* Four 8 bit values(one 32 bit) per coefficient */
+		regmap_write(regmap, reg_add,
+		rx_priv->sidetone_coeff_array[iir_idx][band_idx][idx++]);
+		regmap_write(regmap, reg_add,
+		rx_priv->sidetone_coeff_array[iir_idx][band_idx][idx++]);
+		regmap_write(regmap, reg_add,
+		rx_priv->sidetone_coeff_array[iir_idx][band_idx][idx++]);
+		regmap_write(regmap, reg_add,
+		rx_priv->sidetone_coeff_array[iir_idx][band_idx][idx++]);
+	}
+}
+
+static int rx_macro_iir_enable_audio_mixer_get(struct snd_kcontrol *kcontrol,
+					struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	int iir_idx = ((struct soc_multi_mixer_control *)
+					kcontrol->private_value)->reg;
+	int band_idx = ((struct soc_multi_mixer_control *)
+					kcontrol->private_value)->shift;
+	/* IIR filter band registers are at integer multiples of 0x80 */
+	u16 iir_reg = BOLERO_CDC_RX_SIDETONE_IIR0_IIR_CTL + 0x80 * iir_idx;
+
+	ucontrol->value.integer.value[0] = (snd_soc_read(codec, iir_reg) &
+					    (1 << band_idx)) != 0;
+
+	dev_dbg(codec->dev, "%s: IIR #%d band #%d enable %d\n", __func__,
+		iir_idx, band_idx,
+		(uint32_t)ucontrol->value.integer.value[0]);
+	return 0;
+}
+
+static int rx_macro_iir_enable_audio_mixer_put(struct snd_kcontrol *kcontrol,
+					struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	int iir_idx = ((struct soc_multi_mixer_control *)
+					kcontrol->private_value)->reg;
+	int band_idx = ((struct soc_multi_mixer_control *)
+					kcontrol->private_value)->shift;
+	bool iir_band_en_status = 0;
+	int value = ucontrol->value.integer.value[0];
+	u16 iir_reg = BOLERO_CDC_RX_SIDETONE_IIR0_IIR_CTL + 0x80 * iir_idx;
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	rx_macro_restore_iir_coeff(rx_priv, iir_idx, band_idx);
+
+	/* Mask first 5 bits, 6-8 are reserved */
+	snd_soc_update_bits(codec, iir_reg, (1 << band_idx),
+			    (value << band_idx));
+
+	iir_band_en_status = ((snd_soc_read(codec, iir_reg) &
+			      (1 << band_idx)) != 0);
+	dev_dbg(codec->dev, "%s: IIR #%d band #%d enable %d\n", __func__,
+		iir_idx, band_idx, iir_band_en_status);
+	return 0;
+}
+
+static uint32_t get_iir_band_coeff(struct snd_soc_codec *codec,
+				   int iir_idx, int band_idx,
+				   int coeff_idx)
+{
+	uint32_t value = 0;
+
+	/* Address does not automatically update if reading */
+	snd_soc_write(codec,
+		(BOLERO_CDC_RX_SIDETONE_IIR0_IIR_COEF_B1_CTL + 0x80 * iir_idx),
+		((band_idx * BAND_MAX + coeff_idx)
+		* sizeof(uint32_t)) & 0x7F);
+
+	value |= snd_soc_read(codec,
+		(BOLERO_CDC_RX_SIDETONE_IIR0_IIR_COEF_B2_CTL + 0x80 * iir_idx));
+
+	snd_soc_write(codec,
+		(BOLERO_CDC_RX_SIDETONE_IIR0_IIR_COEF_B1_CTL + 0x80 * iir_idx),
+		((band_idx * BAND_MAX + coeff_idx)
+		* sizeof(uint32_t) + 1) & 0x7F);
+
+	value |= (snd_soc_read(codec,
+			       (BOLERO_CDC_RX_SIDETONE_IIR0_IIR_COEF_B2_CTL +
+				0x80 * iir_idx)) << 8);
+
+	snd_soc_write(codec,
+		(BOLERO_CDC_RX_SIDETONE_IIR0_IIR_COEF_B1_CTL + 0x80 * iir_idx),
+		((band_idx * BAND_MAX + coeff_idx)
+		* sizeof(uint32_t) + 2) & 0x7F);
+
+	value |= (snd_soc_read(codec,
+			       (BOLERO_CDC_RX_SIDETONE_IIR0_IIR_COEF_B2_CTL +
+				0x80 * iir_idx)) << 16);
+
+	snd_soc_write(codec,
+		(BOLERO_CDC_RX_SIDETONE_IIR0_IIR_COEF_B1_CTL + 0x80 * iir_idx),
+		((band_idx * BAND_MAX + coeff_idx)
+		* sizeof(uint32_t) + 3) & 0x7F);
+
+	/* Mask bits top 2 bits since they are reserved */
+	value |= ((snd_soc_read(codec,
+				(BOLERO_CDC_RX_SIDETONE_IIR0_IIR_COEF_B2_CTL +
+				 16 * iir_idx)) & 0x3F) << 24);
+
+	return value;
+}
+
+static int rx_macro_iir_band_audio_mixer_get(struct snd_kcontrol *kcontrol,
+					struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	int iir_idx = ((struct soc_multi_mixer_control *)
+					kcontrol->private_value)->reg;
+	int band_idx = ((struct soc_multi_mixer_control *)
+					kcontrol->private_value)->shift;
+
+	ucontrol->value.integer.value[0] =
+		get_iir_band_coeff(codec, iir_idx, band_idx, 0);
+	ucontrol->value.integer.value[1] =
+		get_iir_band_coeff(codec, iir_idx, band_idx, 1);
+	ucontrol->value.integer.value[2] =
+		get_iir_band_coeff(codec, iir_idx, band_idx, 2);
+	ucontrol->value.integer.value[3] =
+		get_iir_band_coeff(codec, iir_idx, band_idx, 3);
+	ucontrol->value.integer.value[4] =
+		get_iir_band_coeff(codec, iir_idx, band_idx, 4);
+
+	dev_dbg(codec->dev, "%s: IIR #%d band #%d b0 = 0x%x\n"
+		"%s: IIR #%d band #%d b1 = 0x%x\n"
+		"%s: IIR #%d band #%d b2 = 0x%x\n"
+		"%s: IIR #%d band #%d a1 = 0x%x\n"
+		"%s: IIR #%d band #%d a2 = 0x%x\n",
+		__func__, iir_idx, band_idx,
+		(uint32_t)ucontrol->value.integer.value[0],
+		__func__, iir_idx, band_idx,
+		(uint32_t)ucontrol->value.integer.value[1],
+		__func__, iir_idx, band_idx,
+		(uint32_t)ucontrol->value.integer.value[2],
+		__func__, iir_idx, band_idx,
+		(uint32_t)ucontrol->value.integer.value[3],
+		__func__, iir_idx, band_idx,
+		(uint32_t)ucontrol->value.integer.value[4]);
+	return 0;
+}
+
+static void set_iir_band_coeff(struct snd_soc_codec *codec,
+			       int iir_idx, int band_idx,
+			       uint32_t value)
+{
+	snd_soc_write(codec,
+		(BOLERO_CDC_RX_SIDETONE_IIR0_IIR_COEF_B2_CTL + 0x80 * iir_idx),
+		(value & 0xFF));
+
+	snd_soc_write(codec,
+		(BOLERO_CDC_RX_SIDETONE_IIR0_IIR_COEF_B2_CTL + 0x80 * iir_idx),
+		(value >> 8) & 0xFF);
+
+	snd_soc_write(codec,
+		(BOLERO_CDC_RX_SIDETONE_IIR0_IIR_COEF_B2_CTL + 0x80 * iir_idx),
+		(value >> 16) & 0xFF);
+
+	/* Mask top 2 bits, 7-8 are reserved */
+	snd_soc_write(codec,
+		(BOLERO_CDC_RX_SIDETONE_IIR0_IIR_COEF_B2_CTL + 0x80 * iir_idx),
+		(value >> 24) & 0x3F);
+}
+
+static int rx_macro_iir_band_audio_mixer_put(struct snd_kcontrol *kcontrol,
+					struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	int iir_idx = ((struct soc_multi_mixer_control *)
+					kcontrol->private_value)->reg;
+	int band_idx = ((struct soc_multi_mixer_control *)
+					kcontrol->private_value)->shift;
+	int coeff_idx, idx = 0;
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	/*
+	 * Mask top bit it is reserved
+	 * Updates addr automatically for each B2 write
+	 */
+	snd_soc_write(codec,
+		(BOLERO_CDC_RX_SIDETONE_IIR0_IIR_COEF_B1_CTL + 16 * iir_idx),
+		(band_idx * BAND_MAX * sizeof(uint32_t)) & 0x7F);
+
+	/* Store the coefficients in sidetone coeff array */
+	for (coeff_idx = 0; coeff_idx < RX_MACRO_SIDETONE_IIR_COEFF_MAX;
+		coeff_idx++) {
+		uint32_t value = ucontrol->value.integer.value[coeff_idx];
+
+		set_iir_band_coeff(codec, iir_idx, band_idx, value);
+
+		/* Four 8 bit values(one 32 bit) per coefficient */
+		rx_priv->sidetone_coeff_array[iir_idx][band_idx][idx++] =
+								(value & 0xFF);
+		rx_priv->sidetone_coeff_array[iir_idx][band_idx][idx++] =
+							 (value >> 8) & 0xFF;
+		rx_priv->sidetone_coeff_array[iir_idx][band_idx][idx++] =
+							 (value >> 16) & 0xFF;
+		rx_priv->sidetone_coeff_array[iir_idx][band_idx][idx++] =
+							 (value >> 24) & 0xFF;
+	}
+
+	pr_debug("%s: IIR #%d band #%d b0 = 0x%x\n"
+		"%s: IIR #%d band #%d b1 = 0x%x\n"
+		"%s: IIR #%d band #%d b2 = 0x%x\n"
+		"%s: IIR #%d band #%d a1 = 0x%x\n"
+		"%s: IIR #%d band #%d a2 = 0x%x\n",
+		__func__, iir_idx, band_idx,
+		get_iir_band_coeff(codec, iir_idx, band_idx, 0),
+		__func__, iir_idx, band_idx,
+		get_iir_band_coeff(codec, iir_idx, band_idx, 1),
+		__func__, iir_idx, band_idx,
+		get_iir_band_coeff(codec, iir_idx, band_idx, 2),
+		__func__, iir_idx, band_idx,
+		get_iir_band_coeff(codec, iir_idx, band_idx, 3),
+		__func__, iir_idx, band_idx,
+		get_iir_band_coeff(codec, iir_idx, band_idx, 4));
+	return 0;
+}
+
+static int rx_macro_set_iir_gain(struct snd_soc_dapm_widget *w,
+				    struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
+
+	dev_dbg(codec->dev, "%s: event = %d\n", __func__, event);
+
+	switch (event) {
+	case SND_SOC_DAPM_POST_PMU: /* fall through */
+	case SND_SOC_DAPM_PRE_PMD:
+		if (strnstr(w->name, "IIR0", sizeof("IIR0"))) {
+			snd_soc_write(codec,
+				BOLERO_CDC_RX_SIDETONE_IIR0_IIR_GAIN_B1_CTL,
+			snd_soc_read(codec,
+				BOLERO_CDC_RX_SIDETONE_IIR0_IIR_GAIN_B1_CTL));
+			snd_soc_write(codec,
+				BOLERO_CDC_RX_SIDETONE_IIR0_IIR_GAIN_B2_CTL,
+			snd_soc_read(codec,
+				BOLERO_CDC_RX_SIDETONE_IIR0_IIR_GAIN_B2_CTL));
+			snd_soc_write(codec,
+				BOLERO_CDC_RX_SIDETONE_IIR0_IIR_GAIN_B3_CTL,
+			snd_soc_read(codec,
+				BOLERO_CDC_RX_SIDETONE_IIR0_IIR_GAIN_B3_CTL));
+			snd_soc_write(codec,
+				BOLERO_CDC_RX_SIDETONE_IIR0_IIR_GAIN_B4_CTL,
+			snd_soc_read(codec,
+				BOLERO_CDC_RX_SIDETONE_IIR0_IIR_GAIN_B4_CTL));
+		} else {
+			snd_soc_write(codec,
+				BOLERO_CDC_RX_SIDETONE_IIR1_IIR_GAIN_B1_CTL,
+			snd_soc_read(codec,
+				BOLERO_CDC_RX_SIDETONE_IIR1_IIR_GAIN_B1_CTL));
+			snd_soc_write(codec,
+				BOLERO_CDC_RX_SIDETONE_IIR1_IIR_GAIN_B2_CTL,
+			snd_soc_read(codec,
+				BOLERO_CDC_RX_SIDETONE_IIR1_IIR_GAIN_B2_CTL));
+			snd_soc_write(codec,
+				BOLERO_CDC_RX_SIDETONE_IIR1_IIR_GAIN_B3_CTL,
+			snd_soc_read(codec,
+				BOLERO_CDC_RX_SIDETONE_IIR1_IIR_GAIN_B3_CTL));
+			snd_soc_write(codec,
+				BOLERO_CDC_RX_SIDETONE_IIR1_IIR_GAIN_B4_CTL,
+			snd_soc_read(codec,
+				BOLERO_CDC_RX_SIDETONE_IIR1_IIR_GAIN_B4_CTL));
+		}
+		break;
+	}
+	return 0;
+}
+
+static const struct snd_kcontrol_new rx_macro_snd_controls[] = {
+	SOC_SINGLE_SX_TLV("RX_RX0 Digital Volume",
+			  BOLERO_CDC_RX_RX0_RX_VOL_CTL,
+			  0, -84, 40, digital_gain),
+	SOC_SINGLE_SX_TLV("RX_RX1 Digital Volume",
+			  BOLERO_CDC_RX_RX1_RX_VOL_CTL,
+			  0, -84, 40, digital_gain),
+	SOC_SINGLE_SX_TLV("RX_RX2 Digital Volume",
+			  BOLERO_CDC_RX_RX2_RX_VOL_CTL,
+			  0, -84, 40, digital_gain),
+	SOC_SINGLE_SX_TLV("RX_RX0 Mix Digital Volume",
+		BOLERO_CDC_RX_RX0_RX_VOL_MIX_CTL, 0, -84, 40, digital_gain),
+	SOC_SINGLE_SX_TLV("RX_RX1 Mix Digital Volume",
+		BOLERO_CDC_RX_RX1_RX_VOL_MIX_CTL, 0, -84, 40, digital_gain),
+	SOC_SINGLE_SX_TLV("RX_RX2 Mix Digital Volume",
+		BOLERO_CDC_RX_RX2_RX_VOL_MIX_CTL, 0, -84, 40, digital_gain),
+
+	SOC_SINGLE_EXT("RX_COMP1 Switch", SND_SOC_NOPM, RX_MACRO_COMP1, 1, 0,
+		rx_macro_get_compander, rx_macro_set_compander),
+	SOC_SINGLE_EXT("RX_COMP2 Switch", SND_SOC_NOPM, RX_MACRO_COMP2, 1, 0,
+		rx_macro_get_compander, rx_macro_set_compander),
+
+	SOC_ENUM_EXT("HPH Idle Detect", hph_idle_detect_enum,
+		rx_macro_hph_idle_detect_get, rx_macro_hph_idle_detect_put),
+
+	SOC_ENUM_EXT("RX_EAR Mode", rx_macro_ear_mode_enum,
+		rx_macro_get_ear_mode, rx_macro_put_ear_mode),
+
+	SOC_ENUM_EXT("RX_HPH HD2 Mode", rx_macro_hph_hd2_mode_enum,
+		rx_macro_get_hph_hd2_mode, rx_macro_put_hph_hd2_mode),
+
+	SOC_ENUM_EXT("RX_HPH_PWR_MODE", rx_macro_hph_pwr_mode_enum,
+		rx_macro_get_hph_pwr_mode, rx_macro_put_hph_pwr_mode),
+
+	SOC_ENUM_EXT("RX_GSM mode Enable", rx_macro_vbat_bcl_gsm_mode_enum,
+			rx_macro_vbat_bcl_gsm_mode_func_get,
+			rx_macro_vbat_bcl_gsm_mode_func_put),
+	SOC_SINGLE_EXT("RX_Softclip Enable", SND_SOC_NOPM, 0, 1, 0,
+		     rx_macro_soft_clip_enable_get,
+		     rx_macro_soft_clip_enable_put),
+	SOC_SINGLE_EXT("AUX_HPF Enable", SND_SOC_NOPM, 0, 1, 0,
+			rx_macro_aux_hpf_mode_get,
+			rx_macro_aux_hpf_mode_put),
+
+	SOC_SINGLE_SX_TLV("IIR0 INP0 Volume",
+		BOLERO_CDC_RX_SIDETONE_IIR0_IIR_GAIN_B1_CTL, 0, -84, 40,
+		digital_gain),
+	SOC_SINGLE_SX_TLV("IIR0 INP1 Volume",
+		BOLERO_CDC_RX_SIDETONE_IIR0_IIR_GAIN_B2_CTL, 0, -84, 40,
+		digital_gain),
+	SOC_SINGLE_SX_TLV("IIR0 INP2 Volume",
+		BOLERO_CDC_RX_SIDETONE_IIR0_IIR_GAIN_B3_CTL, 0, -84, 40,
+		digital_gain),
+	SOC_SINGLE_SX_TLV("IIR0 INP3 Volume",
+		BOLERO_CDC_RX_SIDETONE_IIR0_IIR_GAIN_B4_CTL, 0, -84, 40,
+		digital_gain),
+	SOC_SINGLE_SX_TLV("IIR1 INP0 Volume",
+		BOLERO_CDC_RX_SIDETONE_IIR1_IIR_GAIN_B1_CTL, 0, -84, 40,
+		digital_gain),
+	SOC_SINGLE_SX_TLV("IIR1 INP1 Volume",
+		BOLERO_CDC_RX_SIDETONE_IIR1_IIR_GAIN_B2_CTL, 0, -84, 40,
+		digital_gain),
+	SOC_SINGLE_SX_TLV("IIR1 INP2 Volume",
+		BOLERO_CDC_RX_SIDETONE_IIR1_IIR_GAIN_B3_CTL, 0, -84, 40,
+		digital_gain),
+	SOC_SINGLE_SX_TLV("IIR1 INP3 Volume",
+		BOLERO_CDC_RX_SIDETONE_IIR1_IIR_GAIN_B4_CTL, 0, -84, 40,
+		digital_gain),
+
+	SOC_SINGLE_EXT("IIR0 Enable Band1", IIR0, BAND1, 1, 0,
+		rx_macro_iir_enable_audio_mixer_get,
+		rx_macro_iir_enable_audio_mixer_put),
+	SOC_SINGLE_EXT("IIR0 Enable Band2", IIR0, BAND2, 1, 0,
+		rx_macro_iir_enable_audio_mixer_get,
+		rx_macro_iir_enable_audio_mixer_put),
+	SOC_SINGLE_EXT("IIR0 Enable Band3", IIR0, BAND3, 1, 0,
+		rx_macro_iir_enable_audio_mixer_get,
+		rx_macro_iir_enable_audio_mixer_put),
+	SOC_SINGLE_EXT("IIR0 Enable Band4", IIR0, BAND4, 1, 0,
+		rx_macro_iir_enable_audio_mixer_get,
+		rx_macro_iir_enable_audio_mixer_put),
+	SOC_SINGLE_EXT("IIR0 Enable Band5", IIR0, BAND5, 1, 0,
+		rx_macro_iir_enable_audio_mixer_get,
+		rx_macro_iir_enable_audio_mixer_put),
+	SOC_SINGLE_EXT("IIR1 Enable Band1", IIR1, BAND1, 1, 0,
+		rx_macro_iir_enable_audio_mixer_get,
+		rx_macro_iir_enable_audio_mixer_put),
+	SOC_SINGLE_EXT("IIR1 Enable Band2", IIR1, BAND2, 1, 0,
+		rx_macro_iir_enable_audio_mixer_get,
+		rx_macro_iir_enable_audio_mixer_put),
+	SOC_SINGLE_EXT("IIR1 Enable Band3", IIR1, BAND3, 1, 0,
+		rx_macro_iir_enable_audio_mixer_get,
+		rx_macro_iir_enable_audio_mixer_put),
+	SOC_SINGLE_EXT("IIR1 Enable Band4", IIR1, BAND4, 1, 0,
+		rx_macro_iir_enable_audio_mixer_get,
+		rx_macro_iir_enable_audio_mixer_put),
+	SOC_SINGLE_EXT("IIR1 Enable Band5", IIR1, BAND5, 1, 0,
+		rx_macro_iir_enable_audio_mixer_get,
+		rx_macro_iir_enable_audio_mixer_put),
+
+	SOC_SINGLE_MULTI_EXT("IIR0 Band1", IIR0, BAND1, 255, 0, 5,
+		rx_macro_iir_band_audio_mixer_get,
+		rx_macro_iir_band_audio_mixer_put),
+	SOC_SINGLE_MULTI_EXT("IIR0 Band2", IIR0, BAND2, 255, 0, 5,
+		rx_macro_iir_band_audio_mixer_get,
+		rx_macro_iir_band_audio_mixer_put),
+	SOC_SINGLE_MULTI_EXT("IIR0 Band3", IIR0, BAND3, 255, 0, 5,
+		rx_macro_iir_band_audio_mixer_get,
+		rx_macro_iir_band_audio_mixer_put),
+	SOC_SINGLE_MULTI_EXT("IIR0 Band4", IIR0, BAND4, 255, 0, 5,
+		rx_macro_iir_band_audio_mixer_get,
+		rx_macro_iir_band_audio_mixer_put),
+	SOC_SINGLE_MULTI_EXT("IIR0 Band5", IIR0, BAND5, 255, 0, 5,
+		rx_macro_iir_band_audio_mixer_get,
+		rx_macro_iir_band_audio_mixer_put),
+	SOC_SINGLE_MULTI_EXT("IIR1 Band1", IIR1, BAND1, 255, 0, 5,
+		rx_macro_iir_band_audio_mixer_get,
+		rx_macro_iir_band_audio_mixer_put),
+	SOC_SINGLE_MULTI_EXT("IIR1 Band2", IIR1, BAND2, 255, 0, 5,
+		rx_macro_iir_band_audio_mixer_get,
+		rx_macro_iir_band_audio_mixer_put),
+	SOC_SINGLE_MULTI_EXT("IIR1 Band3", IIR1, BAND3, 255, 0, 5,
+		rx_macro_iir_band_audio_mixer_get,
+		rx_macro_iir_band_audio_mixer_put),
+	SOC_SINGLE_MULTI_EXT("IIR1 Band4", IIR1, BAND4, 255, 0, 5,
+		rx_macro_iir_band_audio_mixer_get,
+		rx_macro_iir_band_audio_mixer_put),
+	SOC_SINGLE_MULTI_EXT("IIR1 Band5", IIR1, BAND5, 255, 0, 5,
+		rx_macro_iir_band_audio_mixer_get,
+		rx_macro_iir_band_audio_mixer_put),
+};
+
+static int rx_macro_enable_echo(struct snd_soc_dapm_widget *w,
+				struct snd_kcontrol *kcontrol,
+				int event)
+{
+	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+	u16 val = 0, ec_hq_reg = 0;
+	int ec_tx = 0;
+
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return -EINVAL;
+
+	dev_dbg(rx_dev, "%s %d %s\n", __func__, event, w->name);
+
+	val = snd_soc_read(codec, BOLERO_CDC_RX_INP_MUX_RX_MIX_CFG4);
+	if (!(strcmp(w->name, "RX MIX TX0 MUX")))
+		ec_tx = ((val & 0xf0) >> 0x4) - 1;
+	else if (!(strcmp(w->name, "RX MIX TX1 MUX")))
+		ec_tx = (val & 0x0f) - 1;
+
+	val = snd_soc_read(codec, BOLERO_CDC_RX_INP_MUX_RX_MIX_CFG5);
+	if (!(strcmp(w->name, "RX MIX TX2 MUX")))
+		ec_tx = (val & 0x0f) - 1;
+
+	if (ec_tx < 0 || (ec_tx >= RX_MACRO_EC_MUX_MAX)) {
+		dev_err(rx_dev, "%s: EC mix control not set correctly\n",
+			__func__);
+		return -EINVAL;
+	}
+	ec_hq_reg = BOLERO_CDC_RX_EC_REF_HQ0_EC_REF_HQ_PATH_CTL +
+			    0x40 * ec_tx;
+	snd_soc_update_bits(codec, ec_hq_reg, 0x01, 0x01);
+	ec_hq_reg = BOLERO_CDC_RX_EC_REF_HQ0_EC_REF_HQ_CFG0 +
+				0x40 * ec_tx;
+	/* default set to 48k */
+	snd_soc_update_bits(codec, ec_hq_reg, 0x1E, 0x08);
+
+	return 0;
+}
+
+static const struct snd_soc_dapm_widget rx_macro_dapm_widgets[] = {
+	SND_SOC_DAPM_AIF_IN("RX AIF1 PB", "RX_MACRO_AIF1 Playback", 0,
+		SND_SOC_NOPM, 0, 0),
+
+	SND_SOC_DAPM_AIF_IN("RX AIF2 PB", "RX_MACRO_AIF2 Playback", 0,
+		SND_SOC_NOPM, 0, 0),
+
+	SND_SOC_DAPM_AIF_IN("RX AIF3 PB", "RX_MACRO_AIF3 Playback", 0,
+		SND_SOC_NOPM, 0, 0),
+
+	SND_SOC_DAPM_AIF_IN("RX AIF4 PB", "RX_MACRO_AIF4 Playback", 0,
+		SND_SOC_NOPM, 0, 0),
+
+	SND_SOC_DAPM_AIF_OUT("RX AIF_ECHO", "RX_AIF_ECHO Capture", 0,
+		SND_SOC_NOPM, 0, 0),
+
+	RX_MACRO_DAPM_MUX("RX_MACRO RX0 MUX", RX_MACRO_RX0, rx_macro_rx0),
+	RX_MACRO_DAPM_MUX("RX_MACRO RX1 MUX", RX_MACRO_RX1, rx_macro_rx1),
+	RX_MACRO_DAPM_MUX("RX_MACRO RX2 MUX", RX_MACRO_RX2, rx_macro_rx2),
+	RX_MACRO_DAPM_MUX("RX_MACRO RX3 MUX", RX_MACRO_RX3, rx_macro_rx3),
+	RX_MACRO_DAPM_MUX("RX_MACRO RX4 MUX", RX_MACRO_RX4, rx_macro_rx4),
+	RX_MACRO_DAPM_MUX("RX_MACRO RX5 MUX", RX_MACRO_RX5, rx_macro_rx5),
+
+	SND_SOC_DAPM_MIXER("RX_RX0", SND_SOC_NOPM, 0, 0, NULL, 0),
+	SND_SOC_DAPM_MIXER("RX_RX1", SND_SOC_NOPM, 0, 0, NULL, 0),
+	SND_SOC_DAPM_MIXER("RX_RX2", SND_SOC_NOPM, 0, 0, NULL, 0),
+	SND_SOC_DAPM_MIXER("RX_RX3", SND_SOC_NOPM, 0, 0, NULL, 0),
+	SND_SOC_DAPM_MIXER("RX_RX4", SND_SOC_NOPM, 0, 0, NULL, 0),
+	SND_SOC_DAPM_MIXER("RX_RX5", SND_SOC_NOPM, 0, 0, NULL, 0),
+
+	RX_MACRO_DAPM_MUX("IIR0 INP0 MUX", 0, iir0_inp0),
+	RX_MACRO_DAPM_MUX("IIR0 INP1 MUX", 0, iir0_inp1),
+	RX_MACRO_DAPM_MUX("IIR0 INP2 MUX", 0, iir0_inp2),
+	RX_MACRO_DAPM_MUX("IIR0 INP3 MUX", 0, iir0_inp3),
+	RX_MACRO_DAPM_MUX("IIR1 INP0 MUX", 0, iir1_inp0),
+	RX_MACRO_DAPM_MUX("IIR1 INP1 MUX", 0, iir1_inp1),
+	RX_MACRO_DAPM_MUX("IIR1 INP2 MUX", 0, iir1_inp2),
+	RX_MACRO_DAPM_MUX("IIR1 INP3 MUX", 0, iir1_inp3),
+
+	SND_SOC_DAPM_MUX_E("RX MIX TX0 MUX", SND_SOC_NOPM,
+			   RX_MACRO_EC0_MUX, 0,
+			   &rx_mix_tx0_mux, rx_macro_enable_echo,
+			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_MUX_E("RX MIX TX1 MUX", SND_SOC_NOPM,
+			   RX_MACRO_EC1_MUX, 0,
+			   &rx_mix_tx1_mux, rx_macro_enable_echo,
+			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_MUX_E("RX MIX TX2 MUX", SND_SOC_NOPM,
+			   RX_MACRO_EC2_MUX, 0,
+			   &rx_mix_tx2_mux, rx_macro_enable_echo,
+			   SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+
+	SND_SOC_DAPM_MIXER_E("IIR0", BOLERO_CDC_RX_SIDETONE_IIR0_IIR_PATH_CTL,
+		4, 0, NULL, 0, rx_macro_set_iir_gain,
+		SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD),
+	SND_SOC_DAPM_MIXER_E("IIR1", BOLERO_CDC_RX_SIDETONE_IIR1_IIR_PATH_CTL,
+		4, 0, NULL, 0, rx_macro_set_iir_gain,
+		SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD),
+	SND_SOC_DAPM_MIXER("SRC0", BOLERO_CDC_RX_SIDETONE_SRC0_ST_SRC_PATH_CTL,
+		4, 0, NULL, 0),
+	SND_SOC_DAPM_MIXER("SRC1", BOLERO_CDC_RX_SIDETONE_SRC1_ST_SRC_PATH_CTL,
+		4, 0, NULL, 0),
+
+	RX_MACRO_DAPM_MUX("RX INT0 DEM MUX", 0, rx_int0_dem_inp),
+	RX_MACRO_DAPM_MUX("RX INT1 DEM MUX", 0, rx_int1_dem_inp),
+
+	SND_SOC_DAPM_MUX_E("RX INT0_2 MUX", SND_SOC_NOPM, INTERP_HPHL, 0,
+		&rx_int0_2_mux, rx_macro_enable_mix_path,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
+		SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_MUX_E("RX INT1_2 MUX", SND_SOC_NOPM, INTERP_HPHR, 0,
+		&rx_int1_2_mux, rx_macro_enable_mix_path,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
+		SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_MUX_E("RX INT2_2 MUX", SND_SOC_NOPM, INTERP_AUX, 0,
+		&rx_int2_2_mux, rx_macro_enable_mix_path,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
+		SND_SOC_DAPM_POST_PMD),
+
+	RX_MACRO_DAPM_MUX("RX INT0_1 MIX1 INP0", 0, rx_int0_1_mix_inp0),
+	RX_MACRO_DAPM_MUX("RX INT0_1 MIX1 INP1", 0, rx_int0_1_mix_inp1),
+	RX_MACRO_DAPM_MUX("RX INT0_1 MIX1 INP2", 0, rx_int0_1_mix_inp2),
+	RX_MACRO_DAPM_MUX("RX INT1_1 MIX1 INP0", 0, rx_int1_1_mix_inp0),
+	RX_MACRO_DAPM_MUX("RX INT1_1 MIX1 INP1", 0, rx_int1_1_mix_inp1),
+	RX_MACRO_DAPM_MUX("RX INT1_1 MIX1 INP2", 0, rx_int1_1_mix_inp2),
+	RX_MACRO_DAPM_MUX("RX INT2_1 MIX1 INP0", 0, rx_int2_1_mix_inp0),
+	RX_MACRO_DAPM_MUX("RX INT2_1 MIX1 INP1", 0, rx_int2_1_mix_inp1),
+	RX_MACRO_DAPM_MUX("RX INT2_1 MIX1 INP2", 0, rx_int2_1_mix_inp2),
+
+	SND_SOC_DAPM_MUX_E("RX INT0_1 INTERP", SND_SOC_NOPM, INTERP_HPHL, 0,
+		&rx_int0_1_interp_mux, rx_macro_enable_main_path,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
+		SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_MUX_E("RX INT1_1 INTERP", SND_SOC_NOPM, INTERP_HPHR, 0,
+		&rx_int1_1_interp_mux, rx_macro_enable_main_path,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
+		SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_MUX_E("RX INT2_1 INTERP", SND_SOC_NOPM, INTERP_AUX, 0,
+		&rx_int2_1_interp_mux, rx_macro_enable_main_path,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
+		SND_SOC_DAPM_POST_PMD),
+
+	RX_MACRO_DAPM_MUX("RX INT0_2 INTERP", 0, rx_int0_2_interp),
+	RX_MACRO_DAPM_MUX("RX INT1_2 INTERP", 0, rx_int1_2_interp),
+	RX_MACRO_DAPM_MUX("RX INT2_2 INTERP", 0, rx_int2_2_interp),
+
+	SND_SOC_DAPM_MIXER("RX INT0_1 MIX1", SND_SOC_NOPM, 0, 0, NULL, 0),
+	SND_SOC_DAPM_MIXER("RX INT0 SEC MIX", SND_SOC_NOPM, 0, 0, NULL, 0),
+	SND_SOC_DAPM_MIXER("RX INT1_1 MIX1", SND_SOC_NOPM, 0, 0, NULL, 0),
+	SND_SOC_DAPM_MIXER("RX INT1 SEC MIX", SND_SOC_NOPM, 0, 0, NULL, 0),
+	SND_SOC_DAPM_MIXER("RX INT2_1 MIX1", SND_SOC_NOPM, 0, 0, NULL, 0),
+	SND_SOC_DAPM_MIXER("RX INT2 SEC MIX", SND_SOC_NOPM, 0, 0, NULL, 0),
+
+	SND_SOC_DAPM_MUX_E("RX INT0 MIX2 INP", SND_SOC_NOPM, INTERP_HPHL,
+		0, &rx_int0_mix2_inp_mux, rx_macro_enable_rx_path_clk,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_MUX_E("RX INT1 MIX2 INP", SND_SOC_NOPM, INTERP_HPHR,
+		0, &rx_int1_mix2_inp_mux, rx_macro_enable_rx_path_clk,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_MUX_E("RX INT2 MIX2 INP", SND_SOC_NOPM, INTERP_AUX,
+		0, &rx_int2_mix2_inp_mux, rx_macro_enable_rx_path_clk,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+
+	SND_SOC_DAPM_MIXER_E("RX INT2_1 VBAT", SND_SOC_NOPM,
+		0, 0, rx_int2_1_vbat_mix_switch,
+		ARRAY_SIZE(rx_int2_1_vbat_mix_switch),
+		rx_macro_enable_vbat,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+
+	SND_SOC_DAPM_MIXER("RX INT0 MIX2", SND_SOC_NOPM, 0, 0, NULL, 0),
+	SND_SOC_DAPM_MIXER("RX INT1 MIX2", SND_SOC_NOPM, 0, 0, NULL, 0),
+	SND_SOC_DAPM_MIXER("RX INT2 MIX2", SND_SOC_NOPM, 0, 0, NULL, 0),
+
+	SND_SOC_DAPM_OUTPUT("HPHL_OUT"),
+	SND_SOC_DAPM_OUTPUT("HPHR_OUT"),
+	SND_SOC_DAPM_OUTPUT("AUX_OUT"),
+
+	SND_SOC_DAPM_INPUT("RX_TX DEC0_INP"),
+	SND_SOC_DAPM_INPUT("RX_TX DEC1_INP"),
+	SND_SOC_DAPM_INPUT("RX_TX DEC2_INP"),
+	SND_SOC_DAPM_INPUT("RX_TX DEC3_INP"),
+
+	SND_SOC_DAPM_SUPPLY_S("RX_MCLK", 0, SND_SOC_NOPM, 0, 0,
+	rx_macro_mclk_event, SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+};
+
+static const struct snd_soc_dapm_route rx_audio_map[] = {
+	{"RX AIF1 PB", NULL, "RX_MCLK"},
+	{"RX AIF2 PB", NULL, "RX_MCLK"},
+	{"RX AIF3 PB", NULL, "RX_MCLK"},
+	{"RX AIF4 PB", NULL, "RX_MCLK"},
+
+	{"RX_MACRO RX0 MUX", "AIF1_PB", "RX AIF1 PB"},
+	{"RX_MACRO RX1 MUX", "AIF1_PB", "RX AIF1 PB"},
+	{"RX_MACRO RX2 MUX", "AIF1_PB", "RX AIF1 PB"},
+	{"RX_MACRO RX3 MUX", "AIF1_PB", "RX AIF1 PB"},
+	{"RX_MACRO RX4 MUX", "AIF1_PB", "RX AIF1 PB"},
+	{"RX_MACRO RX5 MUX", "AIF1_PB", "RX AIF1 PB"},
+
+	{"RX_MACRO RX0 MUX", "AIF2_PB", "RX AIF2 PB"},
+	{"RX_MACRO RX1 MUX", "AIF2_PB", "RX AIF2 PB"},
+	{"RX_MACRO RX2 MUX", "AIF2_PB", "RX AIF2 PB"},
+	{"RX_MACRO RX3 MUX", "AIF2_PB", "RX AIF2 PB"},
+	{"RX_MACRO RX4 MUX", "AIF2_PB", "RX AIF2 PB"},
+	{"RX_MACRO RX5 MUX", "AIF2_PB", "RX AIF2 PB"},
+
+	{"RX_MACRO RX0 MUX", "AIF3_PB", "RX AIF3 PB"},
+	{"RX_MACRO RX1 MUX", "AIF3_PB", "RX AIF3 PB"},
+	{"RX_MACRO RX2 MUX", "AIF3_PB", "RX AIF3 PB"},
+	{"RX_MACRO RX3 MUX", "AIF3_PB", "RX AIF3 PB"},
+	{"RX_MACRO RX4 MUX", "AIF3_PB", "RX AIF3 PB"},
+	{"RX_MACRO RX5 MUX", "AIF3_PB", "RX AIF3 PB"},
+
+	{"RX_MACRO RX0 MUX", "AIF4_PB", "RX AIF4 PB"},
+	{"RX_MACRO RX1 MUX", "AIF4_PB", "RX AIF4 PB"},
+	{"RX_MACRO RX2 MUX", "AIF4_PB", "RX AIF4 PB"},
+	{"RX_MACRO RX3 MUX", "AIF4_PB", "RX AIF4 PB"},
+	{"RX_MACRO RX4 MUX", "AIF4_PB", "RX AIF4 PB"},
+	{"RX_MACRO RX5 MUX", "AIF4_PB", "RX AIF4 PB"},
+
+	{"RX_RX0", NULL, "RX_MACRO RX0 MUX"},
+	{"RX_RX1", NULL, "RX_MACRO RX1 MUX"},
+	{"RX_RX2", NULL, "RX_MACRO RX2 MUX"},
+	{"RX_RX3", NULL, "RX_MACRO RX3 MUX"},
+	{"RX_RX4", NULL, "RX_MACRO RX4 MUX"},
+	{"RX_RX5", NULL, "RX_MACRO RX5 MUX"},
+
+	{"RX INT0_1 MIX1 INP0", "RX0", "RX_RX0"},
+	{"RX INT0_1 MIX1 INP0", "RX1", "RX_RX1"},
+	{"RX INT0_1 MIX1 INP0", "RX2", "RX_RX2"},
+	{"RX INT0_1 MIX1 INP0", "RX3", "RX_RX3"},
+	{"RX INT0_1 MIX1 INP0", "RX4", "RX_RX4"},
+	{"RX INT0_1 MIX1 INP0", "RX5", "RX_RX5"},
+	{"RX INT0_1 MIX1 INP0", "IIR0", "IIR0"},
+	{"RX INT0_1 MIX1 INP0", "IIR1", "IIR1"},
+	{"RX INT0_1 MIX1 INP0", "DEC0", "RX_TX DEC0_INP"},
+	{"RX INT0_1 MIX1 INP0", "DEC1", "RX_TX DEC1_INP"},
+	{"RX INT0_1 MIX1 INP1", "RX0", "RX_RX0"},
+	{"RX INT0_1 MIX1 INP1", "RX1", "RX_RX1"},
+	{"RX INT0_1 MIX1 INP1", "RX2", "RX_RX2"},
+	{"RX INT0_1 MIX1 INP1", "RX3", "RX_RX3"},
+	{"RX INT0_1 MIX1 INP1", "RX4", "RX_RX4"},
+	{"RX INT0_1 MIX1 INP1", "RX5", "RX_RX5"},
+	{"RX INT0_1 MIX1 INP1", "IIR0", "IIR0"},
+	{"RX INT0_1 MIX1 INP1", "IIR1", "IIR1"},
+	{"RX INT0_1 MIX1 INP1", "DEC0", "RX_TX DEC0_INP"},
+	{"RX INT0_1 MIX1 INP1", "DEC1", "RX_TX DEC1_INP"},
+	{"RX INT0_1 MIX1 INP2", "RX0", "RX_RX0"},
+	{"RX INT0_1 MIX1 INP2", "RX1", "RX_RX1"},
+	{"RX INT0_1 MIX1 INP2", "RX2", "RX_RX2"},
+	{"RX INT0_1 MIX1 INP2", "RX3", "RX_RX3"},
+	{"RX INT0_1 MIX1 INP2", "RX4", "RX_RX4"},
+	{"RX INT0_1 MIX1 INP2", "RX5", "RX_RX5"},
+	{"RX INT0_1 MIX1 INP2", "IIR0", "IIR0"},
+	{"RX INT0_1 MIX1 INP2", "IIR1", "IIR1"},
+	{"RX INT0_1 MIX1 INP2", "DEC0", "RX_TX DEC0_INP"},
+	{"RX INT0_1 MIX1 INP2", "DEC1", "RX_TX DEC1_INP"},
+
+	{"RX INT1_1 MIX1 INP0", "RX0", "RX_RX0"},
+	{"RX INT1_1 MIX1 INP0", "RX1", "RX_RX1"},
+	{"RX INT1_1 MIX1 INP0", "RX2", "RX_RX2"},
+	{"RX INT1_1 MIX1 INP0", "RX3", "RX_RX3"},
+	{"RX INT1_1 MIX1 INP0", "RX4", "RX_RX4"},
+	{"RX INT1_1 MIX1 INP0", "RX5", "RX_RX5"},
+	{"RX INT1_1 MIX1 INP0", "IIR0", "IIR0"},
+	{"RX INT1_1 MIX1 INP0", "IIR1", "IIR1"},
+	{"RX INT1_1 MIX1 INP0", "DEC0", "RX_TX DEC0_INP"},
+	{"RX INT1_1 MIX1 INP0", "DEC1", "RX_TX DEC1_INP"},
+	{"RX INT1_1 MIX1 INP1", "RX0", "RX_RX0"},
+	{"RX INT1_1 MIX1 INP1", "RX1", "RX_RX1"},
+	{"RX INT1_1 MIX1 INP1", "RX2", "RX_RX2"},
+	{"RX INT1_1 MIX1 INP1", "RX3", "RX_RX3"},
+	{"RX INT1_1 MIX1 INP1", "RX4", "RX_RX4"},
+	{"RX INT1_1 MIX1 INP1", "RX5", "RX_RX5"},
+	{"RX INT1_1 MIX1 INP1", "IIR0", "IIR0"},
+	{"RX INT1_1 MIX1 INP1", "IIR1", "IIR1"},
+	{"RX INT1_1 MIX1 INP1", "DEC0", "RX_TX DEC0_INP"},
+	{"RX INT1_1 MIX1 INP1", "DEC1", "RX_TX DEC1_INP"},
+	{"RX INT1_1 MIX1 INP2", "RX0", "RX_RX0"},
+	{"RX INT1_1 MIX1 INP2", "RX1", "RX_RX1"},
+	{"RX INT1_1 MIX1 INP2", "RX2", "RX_RX2"},
+	{"RX INT1_1 MIX1 INP2", "RX3", "RX_RX3"},
+	{"RX INT1_1 MIX1 INP2", "RX4", "RX_RX4"},
+	{"RX INT1_1 MIX1 INP2", "RX5", "RX_RX5"},
+	{"RX INT1_1 MIX1 INP2", "IIR0", "IIR0"},
+	{"RX INT1_1 MIX1 INP2", "IIR1", "IIR1"},
+	{"RX INT1_1 MIX1 INP2", "DEC0", "RX_TX DEC0_INP"},
+	{"RX INT1_1 MIX1 INP2", "DEC1", "RX_TX DEC1_INP"},
+
+	{"RX INT2_1 MIX1 INP0", "RX0", "RX_RX0"},
+	{"RX INT2_1 MIX1 INP0", "RX1", "RX_RX1"},
+	{"RX INT2_1 MIX1 INP0", "RX2", "RX_RX2"},
+	{"RX INT2_1 MIX1 INP0", "RX3", "RX_RX3"},
+	{"RX INT2_1 MIX1 INP0", "RX4", "RX_RX4"},
+	{"RX INT2_1 MIX1 INP0", "RX5", "RX_RX5"},
+	{"RX INT2_1 MIX1 INP0", "IIR0", "IIR0"},
+	{"RX INT2_1 MIX1 INP0", "IIR1", "IIR1"},
+	{"RX INT2_1 MIX1 INP0", "DEC0", "RX_TX DEC0_INP"},
+	{"RX INT2_1 MIX1 INP0", "DEC1", "RX_TX DEC1_INP"},
+	{"RX INT2_1 MIX1 INP1", "RX0", "RX_RX0"},
+	{"RX INT2_1 MIX1 INP1", "RX1", "RX_RX1"},
+	{"RX INT2_1 MIX1 INP1", "RX2", "RX_RX2"},
+	{"RX INT2_1 MIX1 INP1", "RX3", "RX_RX3"},
+	{"RX INT2_1 MIX1 INP1", "RX4", "RX_RX4"},
+	{"RX INT2_1 MIX1 INP1", "RX5", "RX_RX5"},
+	{"RX INT2_1 MIX1 INP1", "IIR0", "IIR0"},
+	{"RX INT2_1 MIX1 INP1", "IIR1", "IIR1"},
+	{"RX INT2_1 MIX1 INP1", "DEC0", "RX_TX DEC0_INP"},
+	{"RX INT2_1 MIX1 INP1", "DEC1", "RX_TX DEC1_INP"},
+	{"RX INT2_1 MIX1 INP2", "RX0", "RX_RX0"},
+	{"RX INT2_1 MIX1 INP2", "RX1", "RX_RX1"},
+	{"RX INT2_1 MIX1 INP2", "RX2", "RX_RX2"},
+	{"RX INT2_1 MIX1 INP2", "RX3", "RX_RX3"},
+	{"RX INT2_1 MIX1 INP2", "RX4", "RX_RX4"},
+	{"RX INT2_1 MIX1 INP2", "RX5", "RX_RX5"},
+	{"RX INT2_1 MIX1 INP2", "IIR0", "IIR0"},
+	{"RX INT2_1 MIX1 INP2", "IIR1", "IIR1"},
+	{"RX INT2_1 MIX1 INP2", "DEC0", "RX_TX DEC0_INP"},
+	{"RX INT2_1 MIX1 INP2", "DEC1", "RX_TX DEC1_INP"},
+
+	{"RX INT0_1 MIX1", NULL, "RX INT0_1 MIX1 INP0"},
+	{"RX INT0_1 MIX1", NULL, "RX INT0_1 MIX1 INP1"},
+	{"RX INT0_1 MIX1", NULL, "RX INT0_1 MIX1 INP2"},
+	{"RX INT1_1 MIX1", NULL, "RX INT1_1 MIX1 INP0"},
+	{"RX INT1_1 MIX1", NULL, "RX INT1_1 MIX1 INP1"},
+	{"RX INT1_1 MIX1", NULL, "RX INT1_1 MIX1 INP2"},
+	{"RX INT2_1 MIX1", NULL, "RX INT2_1 MIX1 INP0"},
+	{"RX INT2_1 MIX1", NULL, "RX INT2_1 MIX1 INP1"},
+	{"RX INT2_1 MIX1", NULL, "RX INT2_1 MIX1 INP2"},
+
+	{"RX MIX TX0 MUX", "RX_MIX0", "RX INT0 SEC MIX"},
+	{"RX MIX TX0 MUX", "RX_MIX1", "RX INT1 SEC MIX"},
+	{"RX MIX TX0 MUX", "RX_MIX2", "RX INT2 SEC MIX"},
+	{"RX MIX TX1 MUX", "RX_MIX0", "RX INT0 SEC MIX"},
+	{"RX MIX TX1 MUX", "RX_MIX1", "RX INT1 SEC MIX"},
+	{"RX MIX TX1 MUX", "RX_MIX2", "RX INT2 SEC MIX"},
+	{"RX MIX TX2 MUX", "RX_MIX0", "RX INT0 SEC MIX"},
+	{"RX MIX TX2 MUX", "RX_MIX1", "RX INT1 SEC MIX"},
+	{"RX MIX TX2 MUX", "RX_MIX2", "RX INT2 SEC MIX"},
+	{"RX AIF_ECHO", NULL, "RX MIX TX0 MUX"},
+	{"RX AIF_ECHO", NULL, "RX MIX TX1 MUX"},
+	{"RX AIF_ECHO", NULL, "RX MIX TX2 MUX"},
+	{"RX AIF_ECHO", NULL, "RX_MCLK"},
+
+	/* Mixing path INT0 */
+	{"RX INT0_2 MUX", "RX0", "RX_RX0"},
+	{"RX INT0_2 MUX", "RX1", "RX_RX1"},
+	{"RX INT0_2 MUX", "RX2", "RX_RX2"},
+	{"RX INT0_2 MUX", "RX3", "RX_RX3"},
+	{"RX INT0_2 MUX", "RX4", "RX_RX4"},
+	{"RX INT0_2 MUX", "RX5", "RX_RX5"},
+	{"RX INT0_2 INTERP", NULL, "RX INT0_2 MUX"},
+	{"RX INT0 SEC MIX", NULL, "RX INT0_2 INTERP"},
+
+	/* Mixing path INT1 */
+	{"RX INT1_2 MUX", "RX0", "RX_RX0"},
+	{"RX INT1_2 MUX", "RX1", "RX_RX1"},
+	{"RX INT1_2 MUX", "RX2", "RX_RX2"},
+	{"RX INT1_2 MUX", "RX3", "RX_RX3"},
+	{"RX INT1_2 MUX", "RX4", "RX_RX4"},
+	{"RX INT1_2 MUX", "RX5", "RX_RX5"},
+	{"RX INT1_2 INTERP", NULL, "RX INT1_2 MUX"},
+	{"RX INT1 SEC MIX", NULL, "RX INT1_2 INTERP"},
+
+	/* Mixing path INT2 */
+	{"RX INT2_2 MUX", "RX0", "RX_RX0"},
+	{"RX INT2_2 MUX", "RX1", "RX_RX1"},
+	{"RX INT2_2 MUX", "RX2", "RX_RX2"},
+	{"RX INT2_2 MUX", "RX3", "RX_RX3"},
+	{"RX INT2_2 MUX", "RX4", "RX_RX4"},
+	{"RX INT2_2 MUX", "RX5", "RX_RX5"},
+	{"RX INT2_2 INTERP", NULL, "RX INT2_2 MUX"},
+	{"RX INT2 SEC MIX", NULL, "RX INT2_2 INTERP"},
+
+	{"RX INT0_1 INTERP", NULL, "RX INT0_1 MIX1"},
+	{"RX INT0 SEC MIX", NULL, "RX INT0_1 INTERP"},
+	{"RX INT0 MIX2", NULL, "RX INT0 SEC MIX"},
+	{"RX INT0 MIX2", NULL, "RX INT0 MIX2 INP"},
+	{"RX INT0 DEM MUX", "CLSH_DSM_OUT", "RX INT0 MIX2"},
+	{"HPHL_OUT", NULL, "RX INT0 DEM MUX"},
+	{"HPHL_OUT", NULL, "RX_MCLK"},
+
+	{"RX INT1_1 INTERP", NULL, "RX INT1_1 MIX1"},
+	{"RX INT1 SEC MIX", NULL, "RX INT1_1 INTERP"},
+	{"RX INT1 MIX2", NULL, "RX INT1 SEC MIX"},
+	{"RX INT1 MIX2", NULL, "RX INT1 MIX2 INP"},
+	{"RX INT1 DEM MUX", "CLSH_DSM_OUT", "RX INT1 MIX2"},
+	{"HPHR_OUT", NULL, "RX INT1 DEM MUX"},
+	{"HPHR_OUT", NULL, "RX_MCLK"},
+
+	{"RX INT2_1 INTERP", NULL, "RX INT2_1 MIX1"},
+
+	{"RX INT2_1 VBAT", "RX AUX VBAT Enable", "RX INT2_1 INTERP"},
+	{"RX INT2 SEC MIX", NULL, "RX INT2_1 VBAT"},
+
+	{"RX INT2 SEC MIX", NULL, "RX INT2_1 INTERP"},
+	{"RX INT2 MIX2", NULL, "RX INT2 SEC MIX"},
+	{"RX INT2 MIX2", NULL, "RX INT2 MIX2 INP"},
+	{"AUX_OUT", NULL, "RX INT2 MIX2"},
+	{"AUX_OUT", NULL, "RX_MCLK"},
+
+	{"IIR0", NULL, "RX_MCLK"},
+	{"IIR0", NULL, "IIR0 INP0 MUX"},
+	{"IIR0 INP0 MUX", "DEC0", "RX_TX DEC0_INP"},
+	{"IIR0 INP0 MUX", "DEC1", "RX_TX DEC1_INP"},
+	{"IIR0 INP0 MUX", "DEC2", "RX_TX DEC2_INP"},
+	{"IIR0 INP0 MUX", "DEC3", "RX_TX DEC3_INP"},
+	{"IIR0 INP0 MUX", "RX0", "RX_RX0"},
+	{"IIR0 INP0 MUX", "RX1", "RX_RX1"},
+	{"IIR0 INP0 MUX", "RX2", "RX_RX2"},
+	{"IIR0 INP0 MUX", "RX3", "RX_RX3"},
+	{"IIR0 INP0 MUX", "RX4", "RX_RX4"},
+	{"IIR0 INP0 MUX", "RX5", "RX_RX5"},
+	{"IIR0", NULL, "IIR0 INP1 MUX"},
+	{"IIR0 INP1 MUX", "DEC0", "RX_TX DEC0_INP"},
+	{"IIR0 INP1 MUX", "DEC1", "RX_TX DEC1_INP"},
+	{"IIR0 INP1 MUX", "DEC2", "RX_TX DEC2_INP"},
+	{"IIR0 INP1 MUX", "DEC3", "RX_TX DEC3_INP"},
+	{"IIR0 INP1 MUX", "RX0", "RX_RX0"},
+	{"IIR0 INP1 MUX", "RX1", "RX_RX1"},
+	{"IIR0 INP1 MUX", "RX2", "RX_RX2"},
+	{"IIR0 INP1 MUX", "RX3", "RX_RX3"},
+	{"IIR0 INP1 MUX", "RX4", "RX_RX4"},
+	{"IIR0 INP1 MUX", "RX5", "RX_RX5"},
+	{"IIR0", NULL, "IIR0 INP2 MUX"},
+	{"IIR0 INP2 MUX", "DEC0", "RX_TX DEC0_INP"},
+	{"IIR0 INP2 MUX", "DEC1", "RX_TX DEC1_INP"},
+	{"IIR0 INP2 MUX", "DEC2", "RX_TX DEC2_INP"},
+	{"IIR0 INP2 MUX", "DEC3", "RX_TX DEC3_INP"},
+	{"IIR0 INP2 MUX", "RX0", "RX_RX0"},
+	{"IIR0 INP2 MUX", "RX1", "RX_RX1"},
+	{"IIR0 INP2 MUX", "RX2", "RX_RX2"},
+	{"IIR0 INP2 MUX", "RX3", "RX_RX3"},
+	{"IIR0 INP2 MUX", "RX4", "RX_RX4"},
+	{"IIR0 INP2 MUX", "RX5", "RX_RX5"},
+	{"IIR0", NULL, "IIR0 INP3 MUX"},
+	{"IIR0 INP3 MUX", "DEC0", "RX_TX DEC0_INP"},
+	{"IIR0 INP3 MUX", "DEC1", "RX_TX DEC1_INP"},
+	{"IIR0 INP3 MUX", "DEC2", "RX_TX DEC2_INP"},
+	{"IIR0 INP3 MUX", "DEC3", "RX_TX DEC3_INP"},
+	{"IIR0 INP3 MUX", "RX0", "RX_RX0"},
+	{"IIR0 INP3 MUX", "RX1", "RX_RX1"},
+	{"IIR0 INP3 MUX", "RX2", "RX_RX2"},
+	{"IIR0 INP3 MUX", "RX3", "RX_RX3"},
+	{"IIR0 INP3 MUX", "RX4", "RX_RX4"},
+	{"IIR0 INP3 MUX", "RX5", "RX_RX5"},
+
+	{"IIR1", NULL, "RX_MCLK"},
+	{"IIR1", NULL, "IIR1 INP0 MUX"},
+	{"IIR1 INP0 MUX", "DEC0", "RX_TX DEC0_INP"},
+	{"IIR1 INP0 MUX", "DEC1", "RX_TX DEC1_INP"},
+	{"IIR1 INP0 MUX", "DEC2", "RX_TX DEC2_INP"},
+	{"IIR1 INP0 MUX", "DEC3", "RX_TX DEC3_INP"},
+	{"IIR1 INP0 MUX", "RX0", "RX_RX0"},
+	{"IIR1 INP0 MUX", "RX1", "RX_RX1"},
+	{"IIR1 INP0 MUX", "RX2", "RX_RX2"},
+	{"IIR1 INP0 MUX", "RX3", "RX_RX3"},
+	{"IIR1 INP0 MUX", "RX4", "RX_RX4"},
+	{"IIR1 INP0 MUX", "RX5", "RX_RX5"},
+	{"IIR1", NULL, "IIR1 INP1 MUX"},
+	{"IIR1 INP1 MUX", "DEC0", "RX_TX DEC0_INP"},
+	{"IIR1 INP1 MUX", "DEC1", "RX_TX DEC1_INP"},
+	{"IIR1 INP1 MUX", "DEC2", "RX_TX DEC2_INP"},
+	{"IIR1 INP1 MUX", "DEC3", "RX_TX DEC3_INP"},
+	{"IIR1 INP1 MUX", "RX0", "RX_RX0"},
+	{"IIR1 INP1 MUX", "RX1", "RX_RX1"},
+	{"IIR1 INP1 MUX", "RX2", "RX_RX2"},
+	{"IIR1 INP1 MUX", "RX3", "RX_RX3"},
+	{"IIR1 INP1 MUX", "RX4", "RX_RX4"},
+	{"IIR1 INP1 MUX", "RX5", "RX_RX5"},
+	{"IIR1", NULL, "IIR1 INP2 MUX"},
+	{"IIR1 INP2 MUX", "DEC0", "RX_TX DEC0_INP"},
+	{"IIR1 INP2 MUX", "DEC1", "RX_TX DEC1_INP"},
+	{"IIR1 INP2 MUX", "DEC2", "RX_TX DEC2_INP"},
+	{"IIR1 INP2 MUX", "DEC3", "RX_TX DEC3_INP"},
+	{"IIR1 INP2 MUX", "RX0", "RX_RX0"},
+	{"IIR1 INP2 MUX", "RX1", "RX_RX1"},
+	{"IIR1 INP2 MUX", "RX2", "RX_RX2"},
+	{"IIR1 INP2 MUX", "RX3", "RX_RX3"},
+	{"IIR1 INP2 MUX", "RX4", "RX_RX4"},
+	{"IIR1 INP2 MUX", "RX5", "RX_RX5"},
+	{"IIR1", NULL, "IIR1 INP3 MUX"},
+	{"IIR1 INP3 MUX", "DEC0", "RX_TX DEC0_INP"},
+	{"IIR1 INP3 MUX", "DEC1", "RX_TX DEC1_INP"},
+	{"IIR1 INP3 MUX", "DEC2", "RX_TX DEC2_INP"},
+	{"IIR1 INP3 MUX", "DEC3", "RX_TX DEC3_INP"},
+	{"IIR1 INP3 MUX", "RX0", "RX_RX0"},
+	{"IIR1 INP3 MUX", "RX1", "RX_RX1"},
+	{"IIR1 INP3 MUX", "RX2", "RX_RX2"},
+	{"IIR1 INP3 MUX", "RX3", "RX_RX3"},
+	{"IIR1 INP3 MUX", "RX4", "RX_RX4"},
+	{"IIR1 INP3 MUX", "RX5", "RX_RX5"},
+
+	{"SRC0", NULL, "IIR0"},
+	{"SRC1", NULL, "IIR1"},
+	{"RX INT0 MIX2 INP", "SRC0", "SRC0"},
+	{"RX INT0 MIX2 INP", "SRC1", "SRC1"},
+	{"RX INT1 MIX2 INP", "SRC0", "SRC0"},
+	{"RX INT1 MIX2 INP", "SRC1", "SRC1"},
+	{"RX INT2 MIX2 INP", "SRC0", "SRC0"},
+	{"RX INT2 MIX2 INP", "SRC1", "SRC1"},
+};
+
+static int rx_macro_core_vote(void *handle, bool enable)
+{
+	struct rx_macro_priv *rx_priv = (struct rx_macro_priv *) handle;
+
+	if (rx_priv == NULL) {
+		pr_err("%s: rx priv data is NULL\n", __func__);
 		return -EINVAL;
 	}
 	if (enable) {
-		pm_runtime_get_sync(tx_priv->dev);
-		pm_runtime_put_autosuspend(tx_priv->dev);
-		pm_runtime_mark_last_busy(tx_priv->dev);
+		pm_runtime_get_sync(rx_priv->dev);
+		pm_runtime_put_autosuspend(rx_priv->dev);
+		pm_runtime_mark_last_busy(rx_priv->dev);
 	}
 
-	if (bolero_check_core_votes(tx_priv->dev))
+	if (bolero_check_core_votes(rx_priv->dev))
 		return 0;
 	else
 		return -EINVAL;
 }
 
-static int tx_macro_swrm_clock(void *handle, bool enable)
+static int rx_swrm_clock(void *handle, bool enable)
 {
-	struct tx_macro_priv *tx_priv = (struct tx_macro_priv *) handle;
-	struct regmap *regmap = dev_get_regmap(tx_priv->dev->parent, NULL);
+	struct rx_macro_priv *rx_priv = (struct rx_macro_priv *) handle;
+	struct regmap *regmap = dev_get_regmap(rx_priv->dev->parent, NULL);
 	int ret = 0;
 
 	if (regmap == NULL) {
-		dev_err(tx_priv->dev, "%s: regmap is NULL\n", __func__);
+		dev_err(rx_priv->dev, "%s: regmap is NULL\n", __func__);
 		return -EINVAL;
 	}
 
-	mutex_lock(&tx_priv->swr_clk_lock);
-	dev_dbg(tx_priv->dev,
-		"%s: swrm clock %s tx_swr_clk_cnt: %d va_swr_clk_cnt: %d\n",
-		__func__, (enable ? "enable" : "disable"),
-		tx_priv->tx_swr_clk_cnt, tx_priv->va_swr_clk_cnt);
+	mutex_lock(&rx_priv->swr_clk_lock);
 
+	trace_printk("%s: swrm clock %s\n",
+			__func__, (enable ? "enable" : "disable"));
+	dev_dbg(rx_priv->dev, "%s: swrm clock %s\n",
+		__func__, (enable ? "enable" : "disable"));
 	if (enable) {
-		pm_runtime_get_sync(tx_priv->dev);
-		if (tx_priv->va_swr_clk_cnt && !tx_priv->tx_swr_clk_cnt) {
-			ret = tx_macro_tx_va_mclk_enable(tx_priv, regmap,
-							VA_MCLK, enable);
-			if (ret) {
-				pm_runtime_mark_last_busy(tx_priv->dev);
-				pm_runtime_put_autosuspend(tx_priv->dev);
-				goto done;
+		pm_runtime_get_sync(rx_priv->dev);
+		if (rx_priv->swr_clk_users == 0) {
+			ret = msm_cdc_pinctrl_select_active_state(
+						rx_priv->rx_swr_gpio_p);
+			if (ret < 0) {
+				dev_err(rx_priv->dev,
+					"%s: rx swr pinctrl enable failed\n",
+					__func__);
+				pm_runtime_mark_last_busy(rx_priv->dev);
+				pm_runtime_put_autosuspend(rx_priv->dev);
+				goto exit;
 			}
-			tx_priv->va_clk_status++;
-		} else {
-			ret = tx_macro_tx_va_mclk_enable(tx_priv, regmap,
-							TX_MCLK, enable);
-			if (ret) {
-				pm_runtime_mark_last_busy(tx_priv->dev);
-				pm_runtime_put_autosuspend(tx_priv->dev);
-				goto done;
+			ret = rx_macro_mclk_enable(rx_priv, 1, true);
+			if (ret < 0) {
+				msm_cdc_pinctrl_select_sleep_state(
+						rx_priv->rx_swr_gpio_p);
+				dev_err(rx_priv->dev,
+					"%s: rx request clock enable failed\n",
+					__func__);
+				pm_runtime_mark_last_busy(rx_priv->dev);
+				pm_runtime_put_autosuspend(rx_priv->dev);
+				goto exit;
 			}
-			tx_priv->tx_clk_status++;
+			if (rx_priv->reset_swr)
+				regmap_update_bits(regmap,
+					BOLERO_CDC_RX_CLK_RST_CTRL_SWR_CONTROL,
+					0x02, 0x02);
+			regmap_update_bits(regmap,
+				BOLERO_CDC_RX_CLK_RST_CTRL_SWR_CONTROL,
+				0x01, 0x01);
+			if (rx_priv->reset_swr)
+				regmap_update_bits(regmap,
+					BOLERO_CDC_RX_CLK_RST_CTRL_SWR_CONTROL,
+					0x02, 0x00);
+			rx_priv->reset_swr = false;
 		}
-		pm_runtime_mark_last_busy(tx_priv->dev);
-		pm_runtime_put_autosuspend(tx_priv->dev);
+		pm_runtime_mark_last_busy(rx_priv->dev);
+		pm_runtime_put_autosuspend(rx_priv->dev);
+		rx_priv->swr_clk_users++;
 	} else {
-		if (tx_priv->va_clk_status && !tx_priv->tx_clk_status) {
-			ret = tx_macro_tx_va_mclk_enable(tx_priv, regmap,
-							VA_MCLK, enable);
-			if (ret)
-				goto done;
-			--tx_priv->va_clk_status;
-		} else if (!tx_priv->va_clk_status && tx_priv->tx_clk_status) {
-			ret = tx_macro_tx_va_mclk_enable(tx_priv, regmap,
-							TX_MCLK, enable);
-			if (ret)
-				goto done;
-			--tx_priv->tx_clk_status;
-		} else if (tx_priv->va_clk_status && tx_priv->tx_clk_status) {
-			if (!tx_priv->va_swr_clk_cnt && tx_priv->tx_swr_clk_cnt) {
-				ret = tx_macro_tx_va_mclk_enable(tx_priv, regmap,
-								VA_MCLK, enable);
-				if (ret)
-					goto done;
-				--tx_priv->va_clk_status;
-			} else {
-				ret = tx_macro_tx_va_mclk_enable(tx_priv, regmap,
-								TX_MCLK, enable);
-				if (ret)
-					goto done;
-				--tx_priv->tx_clk_status;
+		if (rx_priv->swr_clk_users <= 0) {
+			dev_err(rx_priv->dev,
+				"%s: rx swrm clock users already reset\n",
+				__func__);
+			rx_priv->swr_clk_users = 0;
+			goto exit;
+		}
+		rx_priv->swr_clk_users--;
+		if (rx_priv->swr_clk_users == 0) {
+			regmap_update_bits(regmap,
+				BOLERO_CDC_RX_CLK_RST_CTRL_SWR_CONTROL,
+				0x01, 0x00);
+			rx_macro_mclk_enable(rx_priv, 0, true);
+			ret = msm_cdc_pinctrl_select_sleep_state(
+						rx_priv->rx_swr_gpio_p);
+			if (ret < 0) {
+				dev_err(rx_priv->dev,
+					"%s: rx swr pinctrl disable failed\n",
+					__func__);
+				goto exit;
 			}
-
-		} else {
-			dev_dbg(tx_priv->dev,
-				"%s: Both clocks are disabled\n", __func__);
 		}
 	}
-
-	dev_dbg(tx_priv->dev,
-		"%s: swrm clock users %d tx_clk_sts_cnt: %d va_clk_sts_cnt: %d\n",
-		__func__, tx_priv->swr_clk_users, tx_priv->tx_clk_status,
-		tx_priv->va_clk_status);
-done:
-	mutex_unlock(&tx_priv->swr_clk_lock);
+	trace_printk("%s: swrm clock users %d\n",
+		__func__, rx_priv->swr_clk_users);
+	dev_dbg(rx_priv->dev, "%s: swrm clock users %d\n",
+		__func__, rx_priv->swr_clk_users);
+exit:
+	mutex_unlock(&rx_priv->swr_clk_lock);
 	return ret;
 }
 
-static int tx_macro_validate_dmic_sample_rate(u32 dmic_sample_rate,
-				      struct tx_macro_priv *tx_priv)
+static const struct rx_macro_reg_mask_val rx_macro_reg_init[] = {
+	{BOLERO_CDC_RX_RX0_RX_PATH_SEC7, 0x07, 0x02},
+	{BOLERO_CDC_RX_RX1_RX_PATH_SEC7, 0x07, 0x02},
+	{BOLERO_CDC_RX_RX2_RX_PATH_SEC7, 0x07, 0x02},
+	{BOLERO_CDC_RX_RX0_RX_PATH_CFG3, 0x03, 0x02},
+	{BOLERO_CDC_RX_RX1_RX_PATH_CFG3, 0x03, 0x02},
+	{BOLERO_CDC_RX_RX2_RX_PATH_CFG3, 0x03, 0x02},
+};
+
+static void rx_macro_init_bcl_pmic_reg(struct snd_soc_codec *codec)
 {
-	u32 div_factor = TX_MACRO_CLK_DIV_2;
-	u32 mclk_rate = TX_MACRO_MCLK_FREQ;
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
 
-	if (dmic_sample_rate == TX_MACRO_DMIC_SAMPLE_RATE_UNDEFINED ||
-	    mclk_rate % dmic_sample_rate != 0)
-		goto undefined_rate;
-
-	div_factor = mclk_rate / dmic_sample_rate;
-
-	switch (div_factor) {
-	case 2:
-		tx_priv->dmic_clk_div = TX_MACRO_CLK_DIV_2;
-		break;
-	case 3:
-		tx_priv->dmic_clk_div = TX_MACRO_CLK_DIV_3;
-		break;
-	case 4:
-		tx_priv->dmic_clk_div = TX_MACRO_CLK_DIV_4;
-		break;
-	case 6:
-		tx_priv->dmic_clk_div = TX_MACRO_CLK_DIV_6;
-		break;
-	case 8:
-		tx_priv->dmic_clk_div = TX_MACRO_CLK_DIV_8;
-		break;
-	case 16:
-		tx_priv->dmic_clk_div = TX_MACRO_CLK_DIV_16;
-		break;
-	default:
-		/* Any other DIV factor is invalid */
-		goto undefined_rate;
+	if (!codec) {
+		pr_err("%s: NULL codec pointer!\n", __func__);
+		return;
 	}
 
-	/* Valid dmic DIV factors */
-	dev_dbg(tx_priv->dev, "%s: DMIC_DIV = %u, mclk_rate = %u\n",
-		__func__, div_factor, mclk_rate);
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
+		return;
 
-	return dmic_sample_rate;
-
-undefined_rate:
-	dev_dbg(tx_priv->dev, "%s: Invalid rate %d, for mclk %d\n",
-		 __func__, dmic_sample_rate, mclk_rate);
-	dmic_sample_rate = TX_MACRO_DMIC_SAMPLE_RATE_UNDEFINED;
-
-	return dmic_sample_rate;
+	switch (rx_priv->bcl_pmic_params.id) {
+	case 0:
+		/* Enable ID0 to listen to respective PMIC group interrupts */
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_DECODE_CTL1, 0x02, 0x02);
+		/* Update MC_SID0 */
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_DECODE_CFG1, 0x0F,
+			rx_priv->bcl_pmic_params.sid);
+		/* Update MC_PPID0 */
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_DECODE_CFG2, 0xFF,
+			rx_priv->bcl_pmic_params.ppid);
+		break;
+	case 1:
+		/* Enable ID1 to listen to respective PMIC group interrupts */
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_DECODE_CTL1, 0x01, 0x01);
+		/* Update MC_SID1 */
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_DECODE_CFG3, 0x0F,
+			rx_priv->bcl_pmic_params.sid);
+		/* Update MC_PPID1 */
+		snd_soc_update_bits(codec,
+			BOLERO_CDC_RX_BCL_VBAT_DECODE_CFG1, 0xFF,
+			rx_priv->bcl_pmic_params.ppid);
+		break;
+	default:
+		dev_err(rx_dev, "%s: PMIC ID is invalid %d\n",
+		       __func__, rx_priv->bcl_pmic_params.id);
+		break;
+	}
 }
 
-static const struct tx_macro_reg_mask_val tx_macro_reg_init[] = {
-	{BOLERO_CDC_TX0_TX_PATH_SEC7, 0x3F, 0x02},
-};
-static int tx_macro_init(struct snd_soc_codec *codec)
+static int rx_macro_init(struct snd_soc_codec *codec)
 {
 	struct snd_soc_dapm_context *dapm = snd_soc_codec_get_dapm(codec);
-	int ret = 0, i = 0;
-	struct device *tx_dev = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
+	int ret = 0;
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+	int i;
 
-	tx_dev = bolero_get_device_ptr(codec->dev, TX_MACRO);
-	if (!tx_dev) {
+	rx_dev = bolero_get_device_ptr(codec->dev, RX_MACRO);
+	if (!rx_dev) {
 		dev_err(codec->dev,
 			"%s: null device for macro!\n", __func__);
 		return -EINVAL;
 	}
-	tx_priv = dev_get_drvdata(tx_dev);
-	if (!tx_priv) {
+	rx_priv = dev_get_drvdata(rx_dev);
+	if (!rx_priv) {
 		dev_err(codec->dev,
 			"%s: priv is null for macro!\n", __func__);
 		return -EINVAL;
 	}
-	tx_priv->version = bolero_get_version(tx_dev);
-	if (tx_priv->version >= BOLERO_VERSION_2_0) {
-		ret = snd_soc_dapm_new_controls(dapm,
-				tx_macro_dapm_widgets_common,
-				ARRAY_SIZE(tx_macro_dapm_widgets_common));
-		if (ret < 0) {
-			dev_err(tx_dev, "%s: Failed to add controls\n",
-				__func__);
-			return ret;
-		}
-		if (tx_priv->version == BOLERO_VERSION_2_1)
-			ret = snd_soc_dapm_new_controls(dapm,
-				tx_macro_dapm_widgets_v2,
-				ARRAY_SIZE(tx_macro_dapm_widgets_v2));
-		else if (tx_priv->version == BOLERO_VERSION_2_0)
-			ret = snd_soc_dapm_new_controls(dapm,
-				tx_macro_dapm_widgets_v3,
-				ARRAY_SIZE(tx_macro_dapm_widgets_v3));
-		if (ret < 0) {
-			dev_err(tx_dev, "%s: Failed to add controls\n",
-				__func__);
-			return ret;
-		}
-	} else {
-	ret = snd_soc_dapm_new_controls(dapm, tx_macro_dapm_widgets,
-					ARRAY_SIZE(tx_macro_dapm_widgets));
+
+	ret = snd_soc_dapm_new_controls(dapm, rx_macro_dapm_widgets,
+					ARRAY_SIZE(rx_macro_dapm_widgets));
 	if (ret < 0) {
-		dev_err(tx_dev, "%s: Failed to add controls\n", __func__);
+		dev_err(rx_dev, "%s: failed to add controls\n", __func__);
 		return ret;
-		}
 	}
-
-	if (tx_priv->version >= BOLERO_VERSION_2_0) {
-		ret = snd_soc_dapm_add_routes(dapm,
-					tx_audio_map_common,
-					ARRAY_SIZE(tx_audio_map_common));
-		if (ret < 0) {
-			dev_err(tx_dev, "%s: Failed to add routes\n",
-				__func__);
-			return ret;
-		}
-		if (tx_priv->version == BOLERO_VERSION_2_0)
-			ret = snd_soc_dapm_add_routes(dapm,
-					tx_audio_map_v3,
-					ARRAY_SIZE(tx_audio_map_v3));
-		if (ret < 0) {
-			dev_err(tx_dev, "%s: Failed to add routes\n",
-				__func__);
-			return ret;
-		}
-	} else {
-		ret = snd_soc_dapm_add_routes(dapm, tx_audio_map,
-					ARRAY_SIZE(tx_audio_map));
-		if (ret < 0) {
-			dev_err(tx_dev, "%s: Failed to add routes\n",
-				__func__);
-			return ret;
-		}
+	ret = snd_soc_dapm_add_routes(dapm, rx_audio_map,
+					ARRAY_SIZE(rx_audio_map));
+	if (ret < 0) {
+		dev_err(rx_dev, "%s: failed to add routes\n", __func__);
+		return ret;
 	}
-
 	ret = snd_soc_dapm_new_widgets(dapm->card);
 	if (ret < 0) {
-		dev_err(tx_dev, "%s: Failed to add widgets\n", __func__);
+		dev_err(rx_dev, "%s: failed to add widgets\n", __func__);
 		return ret;
 	}
-
-	if (tx_priv->version >= BOLERO_VERSION_2_0) {
-		ret = snd_soc_add_codec_controls(codec,
-			tx_macro_snd_controls_common,
-			ARRAY_SIZE(tx_macro_snd_controls_common));
-		if (ret < 0) {
-			dev_err(tx_dev, "%s: Failed to add snd_ctls\n",
-				__func__);
-			return ret;
-		}
-		if (tx_priv->version == BOLERO_VERSION_2_0)
-			ret = snd_soc_add_codec_controls(codec,
-				tx_macro_snd_controls_v3,
-				ARRAY_SIZE(tx_macro_snd_controls_v3));
-		if (ret < 0) {
-			dev_err(tx_dev, "%s: Failed to add snd_ctls\n",
-				__func__);
-			return ret;
-		}
-	} else {
-		ret = snd_soc_add_codec_controls(codec,
-				tx_macro_snd_controls,
-				ARRAY_SIZE(tx_macro_snd_controls));
-		if (ret < 0) {
-			dev_err(tx_dev, "%s: Failed to add snd_ctls\n",
-				__func__);
-			return ret;
-		}
+	ret = snd_soc_add_codec_controls(codec, rx_macro_snd_controls,
+				   ARRAY_SIZE(rx_macro_snd_controls));
+	if (ret < 0) {
+		dev_err(rx_dev, "%s: failed to add snd_ctls\n", __func__);
+		return ret;
 	}
-
-	snd_soc_dapm_ignore_suspend(dapm, "TX_AIF1 Capture");
-	snd_soc_dapm_ignore_suspend(dapm, "TX_AIF2 Capture");
-	snd_soc_dapm_ignore_suspend(dapm, "TX_AIF3 Capture");
-	if (tx_priv->version >= BOLERO_VERSION_2_0) {
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_MIC0");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_MIC1");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_MIC2");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_MIC3");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_MIC4");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_MIC5");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_MIC6");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_MIC7");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_MIC8");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_MIC9");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_MIC10");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_MIC11");
-	} else {
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_ADC0");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_ADC1");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_ADC2");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_ADC3");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_DMIC0");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_DMIC1");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_DMIC2");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_DMIC3");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_DMIC4");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_DMIC5");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_DMIC6");
-		snd_soc_dapm_ignore_suspend(dapm, "TX SWR_DMIC7");
-	}
+	rx_priv->dev_up = true;
+	snd_soc_dapm_ignore_suspend(dapm, "RX_MACRO_AIF1 Playback");
+	snd_soc_dapm_ignore_suspend(dapm, "RX_MACRO_AIF2 Playback");
+	snd_soc_dapm_ignore_suspend(dapm, "RX_MACRO_AIF3 Playback");
+	snd_soc_dapm_ignore_suspend(dapm, "RX_MACRO_AIF4 Playback");
+	snd_soc_dapm_ignore_suspend(dapm, "HPHL_OUT");
+	snd_soc_dapm_ignore_suspend(dapm, "HPHR_OUT");
+	snd_soc_dapm_ignore_suspend(dapm, "AUX_OUT");
+	snd_soc_dapm_ignore_suspend(dapm, "RX_TX DEC0_INP");
+	snd_soc_dapm_ignore_suspend(dapm, "RX_TX DEC1_INP");
+	snd_soc_dapm_ignore_suspend(dapm, "RX_TX DEC2_INP");
+	snd_soc_dapm_ignore_suspend(dapm, "RX_TX DEC3_INP");
 	snd_soc_dapm_sync(dapm);
 
-	for (i = 0; i < NUM_DECIMATORS; i++) {
-		tx_priv->tx_hpf_work[i].tx_priv = tx_priv;
-		tx_priv->tx_hpf_work[i].decimator = i;
-		INIT_DELAYED_WORK(&tx_priv->tx_hpf_work[i].dwork,
-			tx_macro_tx_hpf_corner_freq_callback);
-	}
-
-	for (i = 0; i < NUM_DECIMATORS; i++) {
-		tx_priv->tx_mute_dwork[i].tx_priv = tx_priv;
-		tx_priv->tx_mute_dwork[i].decimator = i;
-		INIT_DELAYED_WORK(&tx_priv->tx_mute_dwork[i].dwork,
-			  tx_macro_mute_update_callback);
-	}
-	tx_priv->codec = codec;
-
-	for (i = 0; i < ARRAY_SIZE(tx_macro_reg_init); i++)
+	for (i = 0; i < ARRAY_SIZE(rx_macro_reg_init); i++)
 		snd_soc_update_bits(codec,
-				tx_macro_reg_init[i].reg,
-				tx_macro_reg_init[i].mask,
-				tx_macro_reg_init[i].val);
+				rx_macro_reg_init[i].reg,
+				rx_macro_reg_init[i].mask,
+				rx_macro_reg_init[i].val);
+
+	rx_priv->codec = codec;
+	rx_macro_init_bcl_pmic_reg(codec);
 
 	return 0;
 }
 
-static int tx_macro_deinit(struct snd_soc_codec *codec)
+static int rx_macro_deinit(struct snd_soc_codec *codec)
 {
-	struct device *tx_dev = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
+	struct device *rx_dev = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
 
-	if (!tx_macro_get_data(codec, &tx_dev, &tx_priv, __func__))
+	if (!rx_macro_get_data(codec, &rx_dev, &rx_priv, __func__))
 		return -EINVAL;
 
-	tx_priv->codec = NULL;
+	rx_priv->codec = NULL;
+
 	return 0;
 }
 
-static void tx_macro_add_child_devices(struct work_struct *work)
+static void rx_macro_add_child_devices(struct work_struct *work)
 {
-	struct tx_macro_priv *tx_priv = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
 	struct platform_device *pdev = NULL;
 	struct device_node *node = NULL;
-	struct tx_macro_swr_ctrl_data *swr_ctrl_data = NULL, *temp = NULL;
+	struct rx_swr_ctrl_data *swr_ctrl_data = NULL, *temp = NULL;
 	int ret = 0;
 	u16 count = 0, ctrl_num = 0;
-	struct tx_macro_swr_ctrl_platform_data *platdata = NULL;
-	char plat_dev_name[TX_MACRO_SWR_STRING_LEN] = "";
-	bool tx_swr_master_node = false;
+	struct rx_swr_ctrl_platform_data *platdata = NULL;
+	char plat_dev_name[RX_SWR_STRING_LEN] = "";
+	bool rx_swr_master_node = false;
 
-	tx_priv = container_of(work, struct tx_macro_priv,
-			     tx_macro_add_child_devices_work);
-	if (!tx_priv) {
-		pr_err("%s: Memory for tx_priv does not exist\n",
+	rx_priv = container_of(work, struct rx_macro_priv,
+			     rx_macro_add_child_devices_work);
+	if (!rx_priv) {
+		pr_err("%s: Memory for rx_priv does not exist\n",
 			__func__);
 		return;
 	}
 
-	if (!tx_priv->dev) {
-		pr_err("%s: tx dev does not exist\n", __func__);
+	if (!rx_priv->dev) {
+		pr_err("%s: RX device does not exist\n", __func__);
 		return;
 	}
 
-	if (!tx_priv->dev->of_node) {
-		dev_err(tx_priv->dev,
-			"%s: DT node for tx_priv does not exist\n", __func__);
+	if(!rx_priv->dev->of_node) {
+		dev_err(rx_priv->dev,
+			"%s: DT node for RX dev does not exist\n", __func__);
 		return;
 	}
 
-	platdata = &tx_priv->swr_plat_data;
-	tx_priv->child_count = 0;
+	platdata = &rx_priv->swr_plat_data;
+	rx_priv->child_count = 0;
 
-	for_each_available_child_of_node(tx_priv->dev->of_node, node) {
-		tx_swr_master_node = false;
-		if (strnstr(node->name, "tx_swr_master",
-                                strlen("tx_swr_master")) != NULL)
-			tx_swr_master_node = true;
+	for_each_available_child_of_node(rx_priv->dev->of_node, node) {
+		rx_swr_master_node = false;
+		if (strnstr(node->name, "rx_swr_master",
+				strlen("rx_swr_master")) != NULL)
+			rx_swr_master_node = true;
 
-		if (tx_swr_master_node)
-			strlcpy(plat_dev_name, "tx_swr_ctrl",
-				(TX_MACRO_SWR_STRING_LEN - 1));
+		if(rx_swr_master_node)
+			strlcpy(plat_dev_name, "rx_swr_ctrl",
+				(RX_SWR_STRING_LEN - 1));
 		else
 			strlcpy(plat_dev_name, node->name,
-				(TX_MACRO_SWR_STRING_LEN - 1));
+				(RX_SWR_STRING_LEN - 1));
 
 		pdev = platform_device_alloc(plat_dev_name, -1);
 		if (!pdev) {
-			dev_err(tx_priv->dev, "%s: pdev memory alloc failed\n",
+			dev_err(rx_priv->dev, "%s: pdev memory alloc failed\n",
 				__func__);
 			ret = -ENOMEM;
 			goto err;
 		}
-		pdev->dev.parent = tx_priv->dev;
+		pdev->dev.parent = rx_priv->dev;
 		pdev->dev.of_node = node;
 
-		if (tx_swr_master_node) {
+		if (rx_swr_master_node) {
 			ret = platform_device_add_data(pdev, platdata,
 						       sizeof(*platdata));
 			if (ret) {
@@ -2894,173 +3840,168 @@ static void tx_macro_add_child_devices(struct work_struct *work)
 			goto fail_pdev_add;
 		}
 
-		if (tx_swr_master_node) {
+		if (rx_swr_master_node) {
 			temp = krealloc(swr_ctrl_data,
 					(ctrl_num + 1) * sizeof(
-					struct tx_macro_swr_ctrl_data),
+					struct rx_swr_ctrl_data),
 					GFP_KERNEL);
 			if (!temp) {
 				ret = -ENOMEM;
 				goto fail_pdev_add;
 			}
 			swr_ctrl_data = temp;
-			swr_ctrl_data[ctrl_num].tx_swr_pdev = pdev;
+			swr_ctrl_data[ctrl_num].rx_swr_pdev = pdev;
 			ctrl_num++;
 			dev_dbg(&pdev->dev,
 				"%s: Added soundwire ctrl device(s)\n",
 				__func__);
-			tx_priv->swr_ctrl_data = swr_ctrl_data;
+			rx_priv->swr_ctrl_data = swr_ctrl_data;
 		}
-		if (tx_priv->child_count < TX_MACRO_CHILD_DEVICES_MAX)
-			tx_priv->pdev_child_devices[
-					tx_priv->child_count++] = pdev;
+		if (rx_priv->child_count < RX_MACRO_CHILD_DEVICES_MAX)
+			rx_priv->pdev_child_devices[
+					rx_priv->child_count++] = pdev;
 		else
 			goto err;
 	}
 	return;
 fail_pdev_add:
-	for (count = 0; count < tx_priv->child_count; count++)
-		platform_device_put(tx_priv->pdev_child_devices[count]);
+	for (count = 0; count < rx_priv->child_count; count++)
+		platform_device_put(rx_priv->pdev_child_devices[count]);
 err:
 	return;
 }
 
-static int tx_macro_set_port_map(struct snd_soc_codec *codec,
-				u32 usecase, u32 size, void *data)
-{
-	struct device *tx_dev = NULL;
-	struct tx_macro_priv *tx_priv = NULL;
-	struct swrm_port_config port_cfg;
-	int ret = 0;
-
-	if (!tx_macro_get_data(codec, &tx_dev, &tx_priv, __func__))
-		return -EINVAL;
-
-	memset(&port_cfg, 0, sizeof(port_cfg));
-	port_cfg.uc = usecase;
-	port_cfg.size = size;
-	port_cfg.params = data;
-
-	if (tx_priv->swr_ctrl_data)
-		ret = swrm_wcd_notify(
-			tx_priv->swr_ctrl_data[0].tx_swr_pdev,
-			SWR_SET_PORT_MAP, &port_cfg);
-
-	return ret;
-}
-
-static void tx_macro_init_ops(struct macro_ops *ops,
-			       char __iomem *tx_io_base)
+static void rx_macro_init_ops(struct macro_ops *ops, char __iomem *rx_io_base)
 {
 	memset(ops, 0, sizeof(struct macro_ops));
-	ops->init = tx_macro_init;
-	ops->exit = tx_macro_deinit;
-	ops->io_base = tx_io_base;
-	ops->dai_ptr = tx_macro_dai;
-	ops->num_dais = ARRAY_SIZE(tx_macro_dai);
-	ops->event_handler = tx_macro_event_handler;
-	ops->reg_wake_irq = tx_macro_reg_wake_irq;
-	ops->set_port_map = tx_macro_set_port_map;
-	ops->clk_switch = tx_macro_clk_switch;
-	ops->reg_evt_listener = tx_macro_register_event_listener;
+	ops->init = rx_macro_init;
+	ops->exit = rx_macro_deinit;
+	ops->io_base = rx_io_base;
+	ops->dai_ptr = rx_macro_dai;
+	ops->num_dais = ARRAY_SIZE(rx_macro_dai);
+	ops->event_handler = rx_macro_event_handler;
+	ops->set_port_map = rx_macro_set_port_map;
 }
 
-static int tx_macro_probe(struct platform_device *pdev)
+static int rx_macro_probe(struct platform_device *pdev)
 {
 	struct macro_ops ops = {0};
-	struct tx_macro_priv *tx_priv = NULL;
-	u32 tx_base_addr = 0, sample_rate = 0;
-	char __iomem *tx_io_base = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
+	u32 rx_base_addr = 0, muxsel = 0;
+	char __iomem *rx_io_base = NULL, *muxsel_io = NULL;
 	int ret = 0;
-	const char *dmic_sample_rate = "qcom,tx-dmic-sample-rate";
-	u32 is_used_tx_swr_gpio = 1;
-	const char *is_used_tx_swr_gpio_dt = "qcom,is-used-swr-gpio";
+	u8 bcl_pmic_params[3];
+	u32 default_clk_id = 0;
+	u32 is_used_rx_swr_gpio = 1;
+	const char *is_used_rx_swr_gpio_dt = "qcom,is-used-swr-gpio";
 
-	tx_priv = devm_kzalloc(&pdev->dev, sizeof(struct tx_macro_priv),
+	rx_priv = devm_kzalloc(&pdev->dev, sizeof(struct rx_macro_priv),
 			    GFP_KERNEL);
-	if (!tx_priv)
+	if (!rx_priv)
 		return -ENOMEM;
-	platform_set_drvdata(pdev, tx_priv);
 
-	tx_priv->dev = &pdev->dev;
+	rx_priv->dev = &pdev->dev;
 	ret = of_property_read_u32(pdev->dev.of_node, "reg",
-				   &tx_base_addr);
+				   &rx_base_addr);
 	if (ret) {
 		dev_err(&pdev->dev, "%s: could not find %s entry in dt\n",
 			__func__, "reg");
 		return ret;
 	}
-	dev_set_drvdata(&pdev->dev, tx_priv);
-	if (of_find_property(pdev->dev.of_node, is_used_tx_swr_gpio_dt,
+	ret = of_property_read_u32(pdev->dev.of_node, "qcom,rx_mclk_mode_muxsel",
+				   &muxsel);
+	if (ret) {
+		dev_err(&pdev->dev, "%s: could not find %s entry in dt\n",
+			__func__, "reg");
+		return ret;
+	}
+	ret = of_property_read_u32(pdev->dev.of_node, "qcom,default-clk-id",
+				   &default_clk_id);
+	if (ret) {
+		dev_err(&pdev->dev, "%s: could not find %s entry in dt\n",
+			__func__, "qcom,default-clk-id");
+		default_clk_id = RX_CORE_CLK;
+	}
+	if (of_find_property(pdev->dev.of_node, is_used_rx_swr_gpio_dt,
 			     NULL)) {
 		ret = of_property_read_u32(pdev->dev.of_node,
-					   is_used_tx_swr_gpio_dt,
-					   &is_used_tx_swr_gpio);
+					   is_used_rx_swr_gpio_dt,
+					   &is_used_rx_swr_gpio);
 		if (ret) {
 			dev_err(&pdev->dev, "%s: error reading %s in dt\n",
-				__func__, is_used_tx_swr_gpio_dt);
-			is_used_tx_swr_gpio = 1;
+				__func__, is_used_rx_swr_gpio_dt);
+			is_used_rx_swr_gpio = 1;
 		}
 	}
-	tx_priv->tx_swr_gpio_p = of_parse_phandle(pdev->dev.of_node,
-					"qcom,tx-swr-gpios", 0);
-	if (!tx_priv->tx_swr_gpio_p && is_used_tx_swr_gpio) {
+	rx_priv->rx_swr_gpio_p = of_parse_phandle(pdev->dev.of_node,
+					"qcom,rx-swr-gpios", 0);
+	if (!rx_priv->rx_swr_gpio_p && is_used_rx_swr_gpio) {
 		dev_err(&pdev->dev, "%s: swr_gpios handle not provided!\n",
 			__func__);
 		return -EINVAL;
 	}
-	if (msm_cdc_pinctrl_get_state(tx_priv->tx_swr_gpio_p) < 0 &&
-			is_used_tx_swr_gpio) {
+	if (msm_cdc_pinctrl_get_state(rx_priv->rx_swr_gpio_p) < 0 &&
+		is_used_rx_swr_gpio) {
 		dev_err(&pdev->dev, "%s: failed to get swr pin state\n",
 			__func__);
 		return -EPROBE_DEFER;
 	}
 
-	tx_io_base = devm_ioremap(&pdev->dev,
-				   tx_base_addr, TX_MACRO_MAX_OFFSET);
-	if (!tx_io_base) {
+	rx_io_base = devm_ioremap(&pdev->dev, rx_base_addr,
+				  RX_MACRO_MAX_OFFSET);
+	if (!rx_io_base) {
 		dev_err(&pdev->dev, "%s: ioremap failed\n", __func__);
 		return -ENOMEM;
 	}
-	tx_priv->tx_io_base = tx_io_base;
-	ret = of_property_read_u32(pdev->dev.of_node, dmic_sample_rate,
-				   &sample_rate);
-	if (ret) {
-		dev_err(&pdev->dev,
-			"%s: could not find sample_rate entry in dt\n",
+	rx_priv->rx_io_base = rx_io_base;
+	muxsel_io = devm_ioremap(&pdev->dev, muxsel, 0x4);
+	if (!muxsel_io) {
+		dev_err(&pdev->dev, "%s: ioremap failed for muxsel\n",
 			__func__);
-		tx_priv->dmic_clk_div = TX_MACRO_CLK_DIV_2;
+		return -ENOMEM;
+	}
+	rx_priv->rx_mclk_mode_muxsel = muxsel_io;
+	rx_priv->reset_swr = true;
+	INIT_WORK(&rx_priv->rx_macro_add_child_devices_work,
+		  rx_macro_add_child_devices);
+	rx_priv->swr_plat_data.handle = (void *) rx_priv;
+	rx_priv->swr_plat_data.read = NULL;
+	rx_priv->swr_plat_data.write = NULL;
+	rx_priv->swr_plat_data.bulk_write = NULL;
+	rx_priv->swr_plat_data.clk = rx_swrm_clock;
+	rx_priv->swr_plat_data.core_vote = rx_macro_core_vote;
+	rx_priv->swr_plat_data.handle_irq = NULL;
+
+	ret = of_property_read_u8_array(pdev->dev.of_node,
+				"qcom,rx-bcl-pmic-params", bcl_pmic_params,
+				sizeof(bcl_pmic_params));
+	if (ret) {
+		dev_dbg(&pdev->dev, "%s: could not find %s entry in dt\n",
+			__func__, "qcom,rx-bcl-pmic-params");
 	} else {
-		if (tx_macro_validate_dmic_sample_rate(
-		sample_rate, tx_priv) == TX_MACRO_DMIC_SAMPLE_RATE_UNDEFINED)
-			return -EINVAL;
+		rx_priv->bcl_pmic_params.id = bcl_pmic_params[0];
+		rx_priv->bcl_pmic_params.sid = bcl_pmic_params[1];
+		rx_priv->bcl_pmic_params.ppid = bcl_pmic_params[2];
 	}
-	if (is_used_tx_swr_gpio) {
-		tx_priv->reset_swr = true;
-		INIT_WORK(&tx_priv->tx_macro_add_child_devices_work,
-			  tx_macro_add_child_devices);
-		tx_priv->swr_plat_data.handle = (void *) tx_priv;
-		tx_priv->swr_plat_data.read = NULL;
-		tx_priv->swr_plat_data.write = NULL;
-		tx_priv->swr_plat_data.bulk_write = NULL;
-		tx_priv->swr_plat_data.clk = tx_macro_swrm_clock;
-		tx_priv->swr_plat_data.core_vote = tx_macro_core_vote;
-		tx_priv->swr_plat_data.handle_irq = NULL;
-		mutex_init(&tx_priv->swr_clk_lock);
-	}
-	tx_priv->is_used_tx_swr_gpio = is_used_tx_swr_gpio;
-	mutex_init(&tx_priv->mclk_lock);
-	tx_macro_init_ops(&ops, tx_io_base);
-	ops.clk_id_req = TX_CORE_CLK;
-	ops.default_clk_id = TX_CORE_CLK;
-	ret = bolero_register_macro(&pdev->dev, TX_MACRO, &ops);
+	rx_priv->clk_id = default_clk_id;
+	rx_priv->default_clk_id  = default_clk_id;
+	ops.clk_id_req = rx_priv->clk_id;
+	ops.default_clk_id = default_clk_id;
+
+	rx_priv->is_aux_hpf_on = 1;
+
+	dev_set_drvdata(&pdev->dev, rx_priv);
+	mutex_init(&rx_priv->mclk_lock);
+	mutex_init(&rx_priv->swr_clk_lock);
+	rx_macro_init_ops(&ops, rx_io_base);
+
+	ret = bolero_register_macro(&pdev->dev, RX_MACRO, &ops);
 	if (ret) {
 		dev_err(&pdev->dev,
 			"%s: register macro failed\n", __func__);
 		goto err_reg_macro;
 	}
-	if (is_used_tx_swr_gpio)
-		schedule_work(&tx_priv->tx_macro_add_child_devices_work);
+	schedule_work(&rx_priv->rx_macro_add_child_devices_work);
 	pm_runtime_set_autosuspend_delay(&pdev->dev, AUTO_SUSPEND_DELAY);
 	pm_runtime_use_autosuspend(&pdev->dev);
 	pm_runtime_set_suspended(&pdev->dev);
@@ -3068,48 +4009,46 @@ static int tx_macro_probe(struct platform_device *pdev)
 	pm_runtime_enable(&pdev->dev);
 
 	return 0;
+
 err_reg_macro:
-	mutex_destroy(&tx_priv->mclk_lock);
-	if (is_used_tx_swr_gpio)
-		mutex_destroy(&tx_priv->swr_clk_lock);
+	mutex_destroy(&rx_priv->mclk_lock);
+	mutex_destroy(&rx_priv->swr_clk_lock);
 	return ret;
 }
 
-static int tx_macro_remove(struct platform_device *pdev)
+static int rx_macro_remove(struct platform_device *pdev)
 {
-	struct tx_macro_priv *tx_priv = NULL;
+	struct rx_macro_priv *rx_priv = NULL;
 	u16 count = 0;
 
-	tx_priv = platform_get_drvdata(pdev);
+	rx_priv = dev_get_drvdata(&pdev->dev);
 
-	if (!tx_priv)
+	if (!rx_priv)
 		return -EINVAL;
 
-	if (tx_priv->is_used_tx_swr_gpio) {
-		if (tx_priv->swr_ctrl_data)
-			kfree(tx_priv->swr_ctrl_data);
-		for (count = 0; count < tx_priv->child_count &&
-			count < TX_MACRO_CHILD_DEVICES_MAX; count++)
-			platform_device_unregister(
-				tx_priv->pdev_child_devices[count]);
-	}
+	for (count = 0; count < rx_priv->child_count &&
+		count < RX_MACRO_CHILD_DEVICES_MAX; count++)
+		platform_device_unregister(rx_priv->pdev_child_devices[count]);
 
 	pm_runtime_disable(&pdev->dev);
 	pm_runtime_set_suspended(&pdev->dev);
-	mutex_destroy(&tx_priv->mclk_lock);
-	if (tx_priv->is_used_tx_swr_gpio)
-		mutex_destroy(&tx_priv->swr_clk_lock);
-	bolero_unregister_macro(&pdev->dev, TX_MACRO);
+	bolero_unregister_macro(&pdev->dev, RX_MACRO);
+	mutex_destroy(&rx_priv->mclk_lock);
+	mutex_destroy(&rx_priv->swr_clk_lock);
+	kfree(rx_priv->swr_ctrl_data);
 	return 0;
 }
 
-
-static const struct of_device_id tx_macro_dt_match[] = {
-	{.compatible = "qcom,tx-macro"},
+static const struct of_device_id rx_macro_dt_match[] = {
+	{.compatible = "qcom,rx-macro"},
 	{}
 };
 
 static const struct dev_pm_ops bolero_dev_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(
+		pm_runtime_force_suspend,
+		pm_runtime_force_resume
+	)
 	SET_RUNTIME_PM_OPS(
 		bolero_runtime_suspend,
 		bolero_runtime_resume,
@@ -3117,19 +4056,19 @@ static const struct dev_pm_ops bolero_dev_pm_ops = {
 	)
 };
 
-static struct platform_driver tx_macro_driver = {
+static struct platform_driver rx_macro_driver = {
 	.driver = {
-		.name = "tx_macro",
+		.name = "rx_macro",
 		.owner = THIS_MODULE,
 		.pm = &bolero_dev_pm_ops,
-		.of_match_table = tx_macro_dt_match,
+		.of_match_table = rx_macro_dt_match,
 		.suppress_bind_attrs = true,
 	},
-	.probe = tx_macro_probe,
-	.remove = tx_macro_remove,
+	.probe = rx_macro_probe,
+	.remove = rx_macro_remove,
 };
 
-module_platform_driver(tx_macro_driver);
+module_platform_driver(rx_macro_driver);
 
-MODULE_DESCRIPTION("TX macro driver");
+MODULE_DESCRIPTION("RX macro driver");
 MODULE_LICENSE("GPL v2");
