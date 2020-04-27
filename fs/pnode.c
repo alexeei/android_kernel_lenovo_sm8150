@@ -273,7 +273,6 @@ static int propagate_one(struct mount *m)
 	read_sequnlock_excl(&mount_lock);
 	last_dest = m;
 	last_source = child;
-	
 	hlist_add_head(&child->mnt_hash, list);
 	return count_mounts(m->mnt_ns, child);
 }
