@@ -612,6 +612,7 @@ enum ufshcd_ctx {
 	TM_CMD_SEND,
 	XFR_REQ_COMPL,
 	CLK_SCALE_WORK,
+        PWR_CHG_NOTIFY,
 	DBGFS_CFG_PWR_MODE,
 };
 
