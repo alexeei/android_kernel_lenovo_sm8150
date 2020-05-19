@@ -43,7 +43,7 @@ static u32 stmmac_config_sub_second_increment(void __iomem *ioaddr,
 	 * where ptp_clock is 50MHz if fine method is used to update system
 	 */
 	if (value & PTP_TCR_TSCFUPDT)
-		data = (2000000000ULL / ptp_clock);
+		data = (1000000000ULL / 50000000);
 	else
 		data = (1000000000ULL / ptp_clock);
 
