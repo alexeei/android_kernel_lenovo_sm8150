@@ -1337,7 +1337,7 @@ static bool psci_enter_sleep(struct lpm_cpu *cpu, int idx, bool from_idle)
 		if (cpu->bias)
 			biastimer_start(cpu->bias);
 		stop_critical_timings();
-		cpu_do_idle();
+		wfi();
 		start_critical_timings();
 		return 1;
 	}
