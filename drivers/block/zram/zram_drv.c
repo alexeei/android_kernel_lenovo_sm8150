@@ -17,7 +17,6 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/binfmts.h>
 #include <linux/bio.h>
 #include <linux/bitops.h>
 #include <linux/blkdev.h>
@@ -997,10 +996,6 @@ static ssize_t comp_algorithm_store(struct device *dev,
 	struct zram *zram = dev_to_zram(dev);
 	char compressor[ARRAY_SIZE(zram->compressor)];
 	size_t sz;
-	
-	if (task_is_booster(current))
-		return len;
-
 
 	strlcpy(compressor, buf, sizeof(compressor));
 	/* ignore trailing newline */
@@ -1831,15 +1826,10 @@ static ssize_t disksize_store(struct device *dev,
 	struct zcomp *comp;
 	struct zram *zram = dev_to_zram(dev);
 	int err;
-	#ifndef CONFIG_ZRAM_SIZE_OVERRIDE
 
 	disksize = memparse(buf, NULL);
 	if (!disksize)
 		return -EINVAL;
-	#else
-	disksize = (u64)SZ_1G * CONFIG_ZRAM_SIZE_OVERRIDE;
-	pr_info("Overriding zram size to %li", disksize);
-        #endif
 
 	down_write(&zram->init_lock);
 	if (init_done(zram)) {
