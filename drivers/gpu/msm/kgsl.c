@@ -5056,7 +5056,6 @@ void kgsl_device_platform_remove(struct kgsl_device *device)
 
 	pm_qos_remove_request(&device->pwrctrl.pm_qos_req_dma);
 	
-		pm_qos_remove_request(&device->pwrctrl.l2pc_cpus_qos);
 
 	idr_destroy(&device->context_idr);
 
