@@ -353,9 +353,8 @@ static void __qrtr_node_release(struct kref *kref)
 			sock_put(waiter->sk);
 			kfree(waiter);
 		}
-		
-		radix_tree_iter_delete(&node->qrtr_tx_flow, &iter, slot);
 		kfree(flow);
+		radix_tree_iter_delete(&node->qrtr_tx_flow, &iter, slot);
 	}
 	mutex_unlock(&node->qrtr_tx_lock);
 
