@@ -4469,4 +4469,3 @@ error:
 	mutex_unlock(&panel->panel_lock);
 	return rc;
 }
-
