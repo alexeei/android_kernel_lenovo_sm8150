@@ -312,7 +312,6 @@ static void _sde_encoder_pm_qos_add_request(struct drm_encoder *drm_enc,
 		if ((1 << cpu) & cpu_mask)
 			cpumask_set_cpu(cpu, &req->cpus_affine);
 	}
-	
 	pm_qos_add_request(req, PM_QOS_CPU_DMA_LATENCY, cpu_dma_latency);
 
 	SDE_EVT32_VERBOSE(DRMID(drm_enc), cpu_mask, cpu_dma_latency);
@@ -5824,3 +5823,4 @@ void sde_encoder_recovery_events_handler(struct drm_encoder *encoder,
 	sde_enc = to_sde_encoder_virt(encoder);
 	sde_enc->recovery_events_enabled = enabled;
 }
+
