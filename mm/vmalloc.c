@@ -31,7 +31,7 @@
 #include <linux/compiler.h>
 #include <linux/llist.h>
 #include <linux/bitops.h>
-#include <linux/overflow.h>
+
 #include <linux/uaccess.h>
 #include <asm/tlbflush.h>
 #include <asm/shmparam.h>
@@ -2254,7 +2254,6 @@ finished:
  *	vwrite() -  write vmalloc area in a safe way.
  *	@buf:		buffer for source data
  *	@addr:		vm address.
- *      @pgoff:		offset from @kaddr to start at
  *	@count:		number of bytes to be read.
  *
  *	Returns # of bytes which addr and buf should be incresed.
@@ -2344,16 +2343,9 @@ finished:
  *	Similar to remap_pfn_range() (see mm/memory.c)
  */
 int remap_vmalloc_range_partial(struct vm_area_struct *vma, unsigned long uaddr,
-				void *kaddr, unsigned long pgoff,
-				unsigned long size)
+				void *kaddr, unsigned long size)
 {
 	struct vm_struct *area;
-	
-	unsigned long off;
-	unsigned long end_index;
-
-	if (check_shl_overflow(pgoff, PAGE_SHIFT, &off))
-		return -EINVAL;
 
 	size = PAGE_ALIGN(size);
 
@@ -2367,10 +2359,9 @@ int remap_vmalloc_range_partial(struct vm_area_struct *vma, unsigned long uaddr,
 	if (!(area->flags & VM_USERMAP))
 		return -EINVAL;
 
-	if (check_add_overflow(size, off, &end_index) ||
-	    end_index > get_vm_area_size(area))
+	if (kaddr + size > area->addr + get_vm_area_size(area))
 		return -EINVAL;
-       kaddr += off;
+
 	do {
 		struct page *page = vmalloc_to_page(kaddr);
 		int ret;
@@ -2408,7 +2399,7 @@ int remap_vmalloc_range(struct vm_area_struct *vma, void *addr,
 						unsigned long pgoff)
 {
 	return remap_vmalloc_range_partial(vma, vma->vm_start,
-					    addr, pgoff,
+					   addr + (pgoff << PAGE_SHIFT),
 					   vma->vm_end - vma->vm_start);
 }
 EXPORT_SYMBOL(remap_vmalloc_range);
