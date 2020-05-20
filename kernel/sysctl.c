@@ -308,10 +308,6 @@ static int max_sched_tunable_scaling = SCHED_TUNABLESCALING_END-1;
 #endif /* CONFIG_SMP */
 #endif /* CONFIG_SCHED_DEBUG */
 
-#ifndef CONFIG_SCHED_WALT
-static int sysctl_sched_boost = 0;
-#endif
-
 #ifdef CONFIG_COMPACTION
 static int min_extfrag_threshold;
 static int max_extfrag_threshold = 1000;
@@ -405,13 +401,22 @@ static struct ctl_table kern_table[] = {
 		.extra2		= &one,
 	},
 	{
-		.procname	= "sched_boost",
-		.data		= &sysctl_sched_boost,
+		.procname	= "sched_min_task_util_for_boost",
+		.data		= &sysctl_sched_min_task_util_for_boost,
 		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
-		.proc_handler	= sched_boost_handler,
-		.extra1		= &neg_three,
-		.extra2		= &three,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one_thousand,
+	},
+	{
+		.procname	= "sched_min_task_util_for_colocation",
+		.data		= &sysctl_sched_min_task_util_for_colocation,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one_thousand,
 	},
 	{
 		.procname	= "sched_little_cluster_coloc_fmin_khz",
@@ -3393,24 +3398,6 @@ int proc_douintvec_capacity(struct ctl_table *table, int write,
 	return do_proc_dointvec(table, write, buffer, lenp, ppos,
 				do_proc_douintvec_capacity_conv, NULL);
 }
-
-#ifndef CONFIG_SCHED_WALT
-int sched_boost_handler(struct ctl_table *table, int write,
-		void __user *buffer, size_t *lenp,
-		loff_t *ppos)
-{
-	int ret;
-	unsigned int *data = (unsigned int *)table->data;
-
-	ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
-
-	if (ret || !write)
-		return ret;
-
-	pr_debug("%s set sb to %i\n", current->comm, *data);
-	return ret;
-}
-#endif
 
 #else /* CONFIG_PROC_SYSCTL */
 
