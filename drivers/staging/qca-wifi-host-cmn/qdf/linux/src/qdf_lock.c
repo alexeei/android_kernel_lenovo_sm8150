@@ -241,7 +241,7 @@ qdf_export_symbol(qdf_mutex_release);
  * Return: Pointer to the name if it is valid or a default string
  */
 
-#else
+
 const char *qdf_wake_lock_name(qdf_wake_lock_t *lock)
 {
 	return "NO_WAKELOCK_SUPPORT";
