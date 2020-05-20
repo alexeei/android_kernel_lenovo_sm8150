@@ -275,7 +275,6 @@ qdf_export_symbol(qdf_wake_lock_create);
  * QDF status failure: if wake lock was not acquired
  */
 
-
 QDF_STATUS qdf_wake_lock_acquire(qdf_wake_lock_t *lock, uint32_t reason)
 {
 	return QDF_STATUS_SUCCESS;
@@ -820,3 +819,4 @@ void qdf_lock_stats_cookie_destroy(struct lock_stats *stats)
 	qdf_put_lock_cookie(cookie);
 }
 #endif
+
