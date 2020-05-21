@@ -247,7 +247,7 @@ const char *qdf_wake_lock_name(qdf_wake_lock_t *lock)
 		return lock->name;
 	return "UNNAMED_WAKELOCK";
 }
-#else
+
 const char *qdf_wake_lock_name(qdf_wake_lock_t *lock)
 {
 	return "NO_WAKELOCK_SUPPORT";
