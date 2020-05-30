@@ -1032,6 +1032,19 @@ static int cpu_down_maps_locked(unsigned int cpu, enum cpuhp_state target)
 static int do_cpu_down(unsigned int cpu, enum cpuhp_state target)
 {
 	int err;
+	
+	/*
+	 * For some reason some vendor versions love taking down
+	 * cores 6 and 7 and never getting them online again.
+	 * This is impossible to debug due to the number of vendor
+	 * versions that people use. Disallow taking big (and prime)
+	 * cores by userspace down completely.
+	 */
+	if (cpumask_intersects(cpumask_of(cpu), cpu_perf_mask) ||
+	    cpumask_intersects(cpumask_of(cpu), cpu_perfp_mask)) {
+		pr_info("%s: trying to take down core %i\n", __func__, cpu);
+		return -EINVAL;
+	}
 
 	/*
 	 * When cpusets are enabled, the rebuilding of the scheduling
