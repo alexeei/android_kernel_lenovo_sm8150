@@ -1040,9 +1040,7 @@ int dsi_panel_set_fod_hbm(struct dsi_panel *panel, bool status)
 int dsi_panel_set_backlight(struct dsi_panel *panel, u32 bl_lvl)
 {
 	int rc = 0;
- /*	#added08.05.20 */
-	int bl_dc_min = panel->bl_config.bl_min_level * 2;
-/*	## */
+
 	struct dsi_backlight_config *bl = &panel->bl_config;
 
 	if (panel->host_config.ext_bridge_num)
@@ -1050,9 +1048,8 @@ int dsi_panel_set_backlight(struct dsi_panel *panel, u32 bl_lvl)
 
 #ifdef CONFIG_EXPOSURE_ADJUSTMENT
 /*	#changed 08.05.20 */
-	if (bl_lvl > 0)
-		bl_lvl = ea_panel_calc_backlight(bl_lvl < bl_dc_min ? bl_dc_min : bl_lvl);
-/*	# bl_lvl = ea_panel_calc_backlight(bl_lvl);  */
+	
+ bl_lvl = ea_panel_calc_backlight(bl_lvl);  
 #endif								 
 	 pr_debug("backlight type:%d lvl:%d\n", bl->type, bl_lvl);  
 	switch (bl->type) {
