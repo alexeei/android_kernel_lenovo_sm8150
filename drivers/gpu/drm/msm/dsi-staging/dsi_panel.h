@@ -119,8 +119,6 @@ struct dsi_backlight_config {
 	u32 bl_level;
 	u32 bl_scale;
 	u32 bl_scale_ad;
-	u32 bl_doze_lpm;
-	u32 bl_doze_hbm;
 
 	int en_gpio;
 	/* PWM params */
@@ -168,12 +166,6 @@ struct drm_panel_esd_config {
 	u8 *return_buf;
 	u8 *status_buf;
 	u32 groups;
-};
-
-#define BRIGHTNESS_ALPHA_PAIR_LEN 2
-struct brightness_alpha_pair {
-	u32 brightness;
-	u32 alpha;
 };
 
 struct dsi_panel {
@@ -230,9 +222,6 @@ struct dsi_panel {
 	bool resend_ea;
 
 	u32 doze_backlight_threshold;
-	
-	struct brightness_alpha_pair *fod_dim_lut;
-	u32 fod_dim_lut_count;
 };
 
 static inline bool dsi_panel_ulps_feature_enabled(struct dsi_panel *panel)
@@ -354,10 +343,6 @@ void dsi_panel_ext_bridge_put(struct dsi_panel *panel);
 int dsi_panel_set_doze_backlight(struct dsi_panel *panel, u32 bl_lvl);
 
 int dsi_panel_set_fod_hbm_backlight(struct dsi_panel *panel, bool status);
-
-int dsi_panel_set_fod_hbm(struct dsi_panel *panel, bool status);
-
-u32 dsi_panel_get_fod_dim_alpha(struct dsi_panel *panel);
 
 
 #endif /* _DSI_PANEL_H_ */
