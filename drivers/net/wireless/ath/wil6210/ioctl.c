@@ -1,6 +1,18 @@
-// SPDX-License-Identifier: ISC
-/* Copyright (c) 2014,2017 Qualcomm Atheros, Inc.
- * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+/*
+ * Copyright (c) 2014,2017 Qualcomm Atheros, Inc.
+ * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
 #include <linux/uaccess.h>
@@ -23,19 +35,19 @@ struct wil_android_priv_data {
 };
 
 static void __iomem *wil_ioc_addr(struct wil6210_priv *wil, u32 addr,
-				  u32 size, u32 op)
+				  u32 size, enum wil_memio_op op)
 {
 	void __iomem *a;
 	u32 off;
 
-	switch (op & WIL_MMIO_ADDR_MASK) {
-	case WIL_MMIO_ADDR_LINKER:
+	switch (op & wil_mmio_addr_mask) {
+	case wil_mmio_addr_linker:
 		a = wmi_buffer(wil, cpu_to_le32(addr));
 		break;
-	case WIL_MMIO_ADDR_AHB:
+	case wil_mmio_addr_ahb:
 		a = wmi_addr(wil, addr);
 		break;
-	case WIL_MMIO_ADDR_BAR:
+	case wil_mmio_addr_bar:
 		a = wmi_addr(wil, addr + WIL6210_FW_HOST_OFF);
 		break;
 	default:
@@ -44,7 +56,7 @@ static void __iomem *wil_ioc_addr(struct wil6210_priv *wil, u32 addr,
 	}
 
 	off = a - wil->csr;
-	if (size > wil->bar_size - off) {
+	if (size >= wil->bar_size - off) {
 		wil_err(wil,
 			"Invalid requested block: off(0x%08x) size(0x%08x)\n",
 			off, size);
@@ -79,13 +91,13 @@ static int wil_ioc_memio_dword(struct wil6210_priv *wil, void __user *data)
 		return rc;
 
 	/* operation */
-	switch (io.op & WIL_MMIO_OP_MASK) {
-	case WIL_MMIO_READ:
+	switch (io.op & wil_mmio_op_mask) {
+	case wil_mmio_read:
 		io.val = readl_relaxed(a);
 		need_copy = true;
 		break;
 #if defined(CONFIG_WIL6210_WRITE_IOCTL)
-	case WIL_MMIO_WRITE:
+	case wil_mmio_write:
 		writel_relaxed(io.val, a);
 		wmb(); /* make sure write propagated to HW */
 		break;
@@ -123,10 +135,6 @@ static int wil_ioc_memio_block(struct wil6210_priv *wil, void __user *data)
 		      io.addr, io.size, io.op);
 
 	/* size */
-	if (io.size > WIL6210_MAX_MEM_SIZE) {
-		wil_err(wil, "size is too large:  0x%08x\n", io.size);
-		return -EINVAL;
-	}
 	if (io.size % 4) {
 		wil_err(wil, "size is not multiple of 4:  0x%08x\n", io.size);
 		return -EINVAL;
@@ -150,20 +158,18 @@ static int wil_ioc_memio_block(struct wil6210_priv *wil, void __user *data)
 	}
 
 	/* operation */
-	switch (io.op & WIL_MMIO_OP_MASK) {
-	case WIL_MMIO_READ:
+	switch (io.op & wil_mmio_op_mask) {
+	case wil_mmio_read:
 		wil_memcpy_fromio_32(block, a, io.size);
 		wil_hex_dump_ioctl("Read  ", block, io.size);
-		if (copy_to_user((void __user *)(uintptr_t)io.block,
-				 block, io.size)) {
+		if (copy_to_user(io.block, block, io.size)) {
 			rc = -EFAULT;
 			goto out_unlock;
 		}
 		break;
 #if defined(CONFIG_WIL6210_WRITE_IOCTL)
-	case WIL_MMIO_WRITE:
-		if (copy_from_user(block, (void __user *)(uintptr_t)io.block,
-				   io.size)) {
+	case wil_mmio_write:
+		if (copy_from_user(block, io.block, io.size)) {
 			rc = -EFAULT;
 			goto out_unlock;
 		}

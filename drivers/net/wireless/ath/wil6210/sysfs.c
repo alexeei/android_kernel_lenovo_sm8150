@@ -1,5 +1,18 @@
-// SPDX-License-Identifier: ISC
-/* Copyright (c) 2016,2018-2019 The Linux Foundation. All rights reserved. */
+/*
+ * Copyright (c) 2016,2018 The Linux Foundation. All rights reserved.
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
 
 #include <linux/device.h>
 #include <linux/sysfs.h>
@@ -8,9 +21,9 @@
 #include "wmi.h"
 
 static ssize_t
-ftm_txrx_offset_show(struct device *dev,
-		     struct device_attribute *attr,
-		     char *buf)
+wil_ftm_txrx_offset_sysfs_show(struct device *dev,
+			       struct device_attribute *attr,
+			       char *buf)
 {
 	struct wil6210_priv *wil = dev_get_drvdata(dev);
 	struct wil6210_vif *vif = ndev_to_vif(wil->main_ndev);
@@ -41,43 +54,52 @@ ftm_txrx_offset_show(struct device *dev,
 	return len;
 }
 
-int wil_ftm_offset_set(struct wil6210_priv *wil, const char *buf)
-{
-	wil->ftm_txrx_offset.enabled = 0;
-	if (sscanf(buf, "%u %u", &wil->ftm_txrx_offset.tx_offset,
-		   &wil->ftm_txrx_offset.tx_offset) != 2)
-		return -EINVAL;
-
-	wil->ftm_txrx_offset.enabled = 1;
-	return 0;
-}
-
 static ssize_t
-ftm_txrx_offset_store(struct device *dev,
-		      struct device_attribute *attr,
-		      const char *buf, size_t count)
+wil_ftm_txrx_offset_sysfs_store(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
 {
 	struct wil6210_priv *wil = dev_get_drvdata(dev);
+	struct wil6210_vif *vif = ndev_to_vif(wil->main_ndev);
+	struct wmi_tof_set_tx_rx_offset_cmd cmd;
+	struct {
+		struct wmi_cmd_hdr wmi;
+		struct wmi_tof_set_tx_rx_offset_event evt;
+	} __packed reply;
+	unsigned int tx_offset, rx_offset;
 	int rc;
 
-	rc = wil_ftm_offset_set(wil, buf);
+	if (sscanf(buf, "%u %u", &tx_offset, &rx_offset) != 2)
+		return -EINVAL;
+
+	if (!test_bit(WMI_FW_CAPABILITY_FTM, wil->fw_capabilities))
+		return -EOPNOTSUPP;
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.tx_offset = cpu_to_le32(tx_offset);
+	cmd.rx_offset = cpu_to_le32(rx_offset);
+	memset(&reply, 0, sizeof(reply));
+	rc = wmi_call(wil, WMI_TOF_SET_TX_RX_OFFSET_CMDID, vif->mid,
+		      &cmd, sizeof(cmd), WMI_TOF_SET_TX_RX_OFFSET_EVENTID,
+		      &reply, sizeof(reply), 100);
 	if (rc < 0)
 		return rc;
-
-	rc = wmi_set_tof_tx_rx_offset(wil, wil->ftm_txrx_offset.tx_offset,
-				      wil->ftm_txrx_offset.rx_offset);
-	if (rc < 0)
-		return rc;
-
+	if (reply.evt.status) {
+		wil_err(wil, "set_tof_tx_rx_offset failed, error %d\n",
+			reply.evt.status);
+		return -EIO;
+	}
 	return count;
 }
 
-static DEVICE_ATTR_RW(ftm_txrx_offset);
+static DEVICE_ATTR(ftm_txrx_offset, 0644,
+		   wil_ftm_txrx_offset_sysfs_show,
+		   wil_ftm_txrx_offset_sysfs_store);
 
 static ssize_t
-board_file_show(struct device *dev,
-		struct device_attribute *attr,
-		char *buf)
+wil_board_file_sysfs_show(struct device *dev,
+			  struct device_attribute *attr,
+			  char *buf)
 {
 	struct wil6210_priv *wil = dev_get_drvdata(dev);
 
@@ -86,9 +108,12 @@ board_file_show(struct device *dev,
 	return strlen(buf);
 }
 
-int wil_board_file_set(struct wil6210_priv *wil, const char *buf,
-		       size_t count)
+static ssize_t
+wil_board_file_sysfs_store(struct device *dev,
+			   struct device_attribute *attr,
+			   const char *buf, size_t count)
 {
+	struct wil6210_priv *wil = dev_get_drvdata(dev);
 	size_t len;
 
 	mutex_lock(&wil->mutex);
@@ -110,29 +135,15 @@ int wil_board_file_set(struct wil6210_priv *wil, const char *buf,
 	}
 	mutex_unlock(&wil->mutex);
 
-	return 0;
-}
-
-static ssize_t
-board_file_store(struct device *dev,
-		 struct device_attribute *attr,
-		 const char *buf, size_t count)
-{
-	struct wil6210_priv *wil = dev_get_drvdata(dev);
-	int rc;
-
-	rc = wil_board_file_set(wil, buf, count);
-	if (rc < 0)
-		return rc;
-
 	return count;
 }
 
-static DEVICE_ATTR_RW(board_file);
+static DEVICE_ATTR(board_file, 0644,
+		   wil_board_file_sysfs_show,
+		   wil_board_file_sysfs_store);
 
 static ssize_t
-thermal_throttling_show(struct device *dev, struct device_attribute *attr,
-			char *buf)
+wil_tt_sysfs_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct wil6210_priv *wil = dev_get_drvdata(dev);
 	ssize_t len;
@@ -168,9 +179,11 @@ thermal_throttling_show(struct device *dev, struct device_attribute *attr,
 	return len;
 }
 
-int wil_tt_set(struct wil6210_priv *wil, const char *buf,
-	       size_t count)
+static ssize_t
+wil_tt_sysfs_store(struct device *dev, struct device_attribute *attr,
+		   const char *buf, size_t count)
 {
+	struct wil6210_priv *wil = dev_get_drvdata(dev);
 	int i, rc = -EINVAL;
 	char *token, *dupbuf, *tmp;
 	struct wmi_tt_data tt_data = {
@@ -226,38 +239,22 @@ int wil_tt_set(struct wil6210_priv *wil, const char *buf,
 			tt_data.rf_enabled = 1;
 	}
 
-	wil->tt_data = tt_data;
-	wil->tt_data_set = true;
-	rc = 0;
+	rc = wmi_set_tt_cfg(wil, &tt_data);
+	if (rc)
+		goto out;
 
+	rc = count;
 out:
 	kfree(tmp);
 	return rc;
 }
 
-static ssize_t
-thermal_throttling_store(struct device *dev, struct device_attribute *attr,
-			 const char *buf, size_t count)
-{
-	struct wil6210_priv *wil = dev_get_drvdata(dev);
-	int rc;
-
-	rc = wil_tt_set(wil, buf, count);
-	if (rc)
-		return rc;
-
-	rc = wmi_set_tt_cfg(wil, &wil->tt_data);
-	if (rc)
-		return rc;
-
-	return count;
-}
-
-static DEVICE_ATTR_RW(thermal_throttling);
+static DEVICE_ATTR(thermal_throttling, 0644,
+		   wil_tt_sysfs_show, wil_tt_sysfs_store);
 
 static ssize_t
-fst_link_loss_show(struct device *dev, struct device_attribute *attr,
-		   char *buf)
+wil_fst_link_loss_sysfs_show(struct device *dev, struct device_attribute *attr,
+			     char *buf)
 {
 	struct wil6210_priv *wil = dev_get_drvdata(dev);
 	ssize_t len = 0;
@@ -274,8 +271,8 @@ fst_link_loss_show(struct device *dev, struct device_attribute *attr,
 }
 
 static ssize_t
-fst_link_loss_store(struct device *dev, struct device_attribute *attr,
-		    const char *buf, size_t count)
+wil_fst_link_loss_sysfs_store(struct device *dev, struct device_attribute *attr,
+			      const char *buf, size_t count)
 {
 	struct wil6210_priv *wil = dev_get_drvdata(dev);
 	u8 addr[ETH_ALEN];
@@ -315,101 +312,13 @@ out:
 	return rc;
 }
 
-static DEVICE_ATTR_RW(fst_link_loss);
+static DEVICE_ATTR(fst_link_loss, 0644,
+		   wil_fst_link_loss_sysfs_show,
+		   wil_fst_link_loss_sysfs_store);
 
 static ssize_t
-fst_config_store(struct device *dev, struct device_attribute *attr,
-		 const char *buf, size_t count)
-{
-	struct wil6210_priv *wil = dev_get_drvdata(dev);
-	u8 addr[ETH_ALEN];
-	int rc;
-	u8 enabled, entry_mcs, exit_mcs, slevel;
-
-	/* <ap_bssid> <enabled> <entry_mcs> <exit_mcs> <sensitivity_level> */
-	if (sscanf(buf, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx %hhu %hhu %hhu %hhu",
-		   &addr[0], &addr[1], &addr[2],
-		   &addr[3], &addr[4], &addr[5],
-		   &enabled, &entry_mcs, &exit_mcs, &slevel) != 10)
-		return -EINVAL;
-
-	if (entry_mcs > WIL_MCS_MAX || exit_mcs > WIL_MCS_MAX ||
-	    entry_mcs < exit_mcs || slevel > WMI_FST_SWITCH_SENSITIVITY_HIGH)
-		return -EINVAL;
-
-	wil_dbg_misc(wil,
-		     "fst_config %sabled for [%pM] with entry/exit MCS %d/%d, sensitivity %s\n",
-		     enabled ? "en" : "dis", addr, entry_mcs, exit_mcs,
-		     (slevel == WMI_FST_SWITCH_SENSITIVITY_LOW) ?
-			"LOW" : (slevel == WMI_FST_SWITCH_SENSITIVITY_HIGH) ?
-					"HIGH" : "MED");
-
-	rc = wmi_set_fst_config(wil, addr, enabled, entry_mcs, exit_mcs,
-				slevel);
-	if (!rc)
-		rc = count;
-
-	return rc;
-}
-
-static DEVICE_ATTR_WO(fst_config);
-
-static ssize_t
-vr_profile_show(struct device *dev, struct device_attribute *attr,
-		char *buf)
-{
-	struct wil6210_priv *wil = dev_get_drvdata(dev);
-	ssize_t len;
-
-	len = snprintf(buf, PAGE_SIZE, "%s\n",
-		       wil_get_vr_profile_name(wil->vr_profile));
-
-	return len;
-}
-
-static ssize_t
-vr_profile_store(struct device *dev, struct device_attribute *attr,
-		 const char *buf, size_t count)
-{
-	struct wil6210_priv *wil = dev_get_drvdata(dev);
-	u8 profile;
-	int rc = 0;
-
-	if (kstrtou8(buf, 0, &profile))
-		return -EINVAL;
-
-	if (test_bit(wil_status_fwready, wil->status)) {
-		wil_err(wil, "Cannot set VR while interface is up\n");
-		return -EIO;
-	}
-
-	if (profile == wil->vr_profile) {
-		wil_info(wil, "Ignore same VR profile %s\n",
-			 wil_get_vr_profile_name(wil->vr_profile));
-		return count;
-	}
-
-	wil_info(wil, "Sysfs: set VR profile to %s\n",
-		 wil_get_vr_profile_name(profile));
-
-	/* Enabling of VR mode is done from wil_reset after FW is ready.
-	 * Disabling is done from here.
-	 */
-	if (profile == WMI_VR_PROFILE_DISABLED) {
-		rc = wil_vr_update_profile(wil, profile);
-		if (rc)
-			return rc;
-	}
-	wil->vr_profile = profile;
-
-	return count;
-}
-
-static DEVICE_ATTR_RW(vr_profile);
-
-static ssize_t
-snr_thresh_show(struct device *dev, struct device_attribute *attr,
-		char *buf)
+wil_snr_thresh_sysfs_show(struct device *dev, struct device_attribute *attr,
+			  char *buf)
 {
 	struct wil6210_priv *wil = dev_get_drvdata(dev);
 	ssize_t len = 0;
@@ -421,41 +330,29 @@ snr_thresh_show(struct device *dev, struct device_attribute *attr,
 	return len;
 }
 
-int wil_snr_thresh_set(struct wil6210_priv *wil, const char *buf)
-{
-	wil->snr_thresh.enabled = 0;
-	/* to disable snr threshold, set both omni and direct to 0 */
-	if (sscanf(buf, "%hd %hd", &wil->snr_thresh.omni,
-		   &wil->snr_thresh.direct) != 2)
-		return -EINVAL;
-
-	if (wil->snr_thresh.omni != 0 || wil->snr_thresh.direct != 0)
-		wil->snr_thresh.enabled = 1;
-
-	return 0;
-}
-
 static ssize_t
-snr_thresh_store(struct device *dev,
-		 struct device_attribute *attr,
-		 const char *buf, size_t count)
+wil_snr_thresh_sysfs_store(struct device *dev,
+			   struct device_attribute *attr,
+			   const char *buf, size_t count)
 {
 	struct wil6210_priv *wil = dev_get_drvdata(dev);
 	int rc;
+	short omni, direct;
 
-	rc = wil_snr_thresh_set(wil, buf);
-	if (rc < 0)
-		return rc;
+	/* to disable snr threshold, set both omni and direct to 0 */
+	if (sscanf(buf, "%hd %hd", &omni, &direct) != 2)
+		return -EINVAL;
 
-	rc = wmi_set_snr_thresh(wil, wil->snr_thresh.omni,
-				wil->snr_thresh.direct);
+	rc = wmi_set_snr_thresh(wil, omni, direct);
 	if (!rc)
 		rc = count;
 
 	return rc;
 }
 
-static DEVICE_ATTR_RW(snr_thresh);
+static DEVICE_ATTR(snr_thresh, 0644,
+		   wil_snr_thresh_sysfs_show,
+		   wil_snr_thresh_sysfs_store);
 
 static struct attribute *wil6210_sysfs_entries[] = {
 	&dev_attr_ftm_txrx_offset.attr,
@@ -463,8 +360,6 @@ static struct attribute *wil6210_sysfs_entries[] = {
 	&dev_attr_thermal_throttling.attr,
 	&dev_attr_fst_link_loss.attr,
 	&dev_attr_snr_thresh.attr,
-	&dev_attr_vr_profile.attr,
-	&dev_attr_fst_config.attr,
 	NULL
 };
 
