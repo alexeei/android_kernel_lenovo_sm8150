@@ -29,6 +29,8 @@ mdss-mdp-objs += mdss_mdp_pp_v1_7.o
 mdss-mdp-objs += mdss_mdp_pp_v3.o
 mdss-mdp-objs += mdss_mdp_pp_common.o
 
+obj-$(CONFIG_FLICKER_FREE) += flicker_free.o flicker_free_enabler.o
+
 ifeq ($(CONFIG_FB_MSM_MDSS),y)
 obj-$(CONFIG_DEBUG_FS) += mdss_debug.o mdss_debug_xlog.o
 endif
