@@ -4,6 +4,7 @@
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <asm/uaccess.h>
+#include <linux/malloc.h>
 
 #include "flicker_free.h"
 
