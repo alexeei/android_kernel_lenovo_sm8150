@@ -130,7 +130,7 @@ struct mdss_pp_res_type_v1_7 {
 	struct mdp_pcc_data_v1_7 user_pcc_v17_data[MDSS_BLOCK_DISP_NUM];
 	struct mdp_pcc_data_v1_7 pcc_v17_data[MDSS_BLOCK_DISP_NUM];
 	struct mdp_pa_data_v1_7 pa_v17_data[MDSS_BLOCK_DISP_NUM];
-	struct mdp_pa_dither_res_data_v1_7 pa_dither_data[MDSS_BLOCK_DISP_NUM];
+	
 };
 
 struct mdp_igc_lut_data_config {
