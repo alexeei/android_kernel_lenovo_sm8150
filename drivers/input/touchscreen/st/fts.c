@@ -4092,7 +4092,7 @@ static int fts_fb_state_chg_callback(struct notifier_block *nb,
 	struct fb_event *evdata = data;
 	unsigned int blank;
 
-	if (!evdata || (evdata->id != 0))
+	if (!evdata)
 		return 0;
 
 	if (val != FB_EVENT_BLANK)
