@@ -4092,7 +4092,7 @@ static int fts_fb_state_chg_callback(struct notifier_block *nb,
 	struct fb_event *evdata = data;
 	unsigned int blank;
 
-	if (!evdata)
+	if (!evdata || (evdata->id != 0))
 		return 0;
 
 	if (val != FB_EVENT_BLANK)
@@ -4908,4 +4908,3 @@ module_exit(fts_driver_exit);
 
 MODULE_DESCRIPTION("STMicroelectronics MultiTouch IC Driver");
 MODULE_LICENSE("GPL v2");
-
