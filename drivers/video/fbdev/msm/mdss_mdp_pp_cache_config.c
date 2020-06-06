@@ -678,7 +678,7 @@ static int pp_pcc_cache_params_v1_7(struct mdp_pcc_cfg_data *config,
 		mdss_pp_res->user_pcc_disp_cfg[disp_num].cfg_payload =
 			(void *) v17_user_data;
 		mdss_pp_res->pcc_disp_cfg[disp_num].cfg_payload =
-			(void *) v17_cache_data;
+			(void *) v17_real_data;
 		if (copy_from_user(&v17_usr_config, config->cfg_payload,
 				   sizeof(v17_usr_config))) {
 		#if defined(CONFIG_FB_MSM_MDSS_KCAL_CTRL) || defined(CONFIG_FLICKER_FREE)
