@@ -4908,3 +4908,4 @@ module_exit(fts_driver_exit);
 
 MODULE_DESCRIPTION("STMicroelectronics MultiTouch IC Driver");
 MODULE_LICENSE("GPL v2");
+
