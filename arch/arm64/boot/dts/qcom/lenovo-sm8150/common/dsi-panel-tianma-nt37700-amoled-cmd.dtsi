@@ -54,7 +54,7 @@
 			timing@0{
 				qcom,mdss-dsi-panel-width = <1080>;
 				qcom,mdss-dsi-panel-height = <2340>;
-				qcom,mdss-dsi-panel-framerate = <65>;
+				qcom,mdss-dsi-panel-framerate = <60>;
 				qcom,mdss-dsi-panel-clockrate = <1094000000>;
 				qcom,mdss-dsi-h-front-porch = <100>;
 				qcom,mdss-dsi-h-back-porch = <100>;
