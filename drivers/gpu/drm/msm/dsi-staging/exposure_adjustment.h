@@ -29,7 +29,7 @@
        
 
 #define ELVSS_OFF_THRESHOLD        300
-#define EXPOSURE_ADJUSTMENT_MIN    2080
+#define EXPOSURE_ADJUSTMENT_MIN    3080
 
 /* PCC coefficient when exposure is 255 */
 #define EXPOSURE_ADJUSTMENT_MAX    32768
