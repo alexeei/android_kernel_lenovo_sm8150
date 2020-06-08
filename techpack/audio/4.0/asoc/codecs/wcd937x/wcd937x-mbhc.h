@@ -51,6 +51,7 @@ static inline int wcd937x_mbhc_post_ssr_init(struct wcd937x_mbhc *mbhc,
 static inline void wcd937x_mbhc_ssr_down(struct wcd937x_mbhc *mbhc,
 					   struct snd_soc_component *component)
 {
+return 0;
 }
 static inline int wcd937x_mbhc_get_impedance(struct wcd937x_mbhc *wcd937x_mbhc,
 					   uint32_t *zl, uint32_t *zr)
