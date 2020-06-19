@@ -46,7 +46,7 @@ struct mtk_pwm_data {
 	unsigned int commit_mask;
 
 	unsigned int bls_debug;
-	u32 bls_debug_mask = 0;
+	u32 bls_debug_mask;
 };
 
 struct mtk_disp_pwm {

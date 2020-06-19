@@ -1,4 +1,4 @@
-/* Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -151,6 +151,7 @@ static const struct backlight_ops sde_backlight_hbm_device_ops = {
 };
 #endif
 
+
 static int sde_backlight_device_update_status(struct backlight_device *bd)
 {
 	int brightness;
@@ -244,6 +245,7 @@ static int sde_backlight_setup(struct sde_connector *c_conn,
 	c_conn->bl_hdm = backlight_device_register(bl_node_name, dev->dev,
 			c_conn, &sde_backlight_hbm_device_ops, &props);
 #endif
+
 	if (IS_ERR_OR_NULL(c_conn->bl_device)) {
 		SDE_ERROR("Failed to register backlight: %ld\n",
 				    PTR_ERR(c_conn->bl_device));
@@ -332,6 +334,7 @@ void sde_connector_unregister_event(struct drm_connector *connector,
 	(void)sde_connector_register_event(connector, event_idx, 0, 0);
 }
 
+
 static int _sde_connector_get_default_dither_cfg_v1(
 		struct sde_connector *c_conn, void *cfg)
 {
@@ -376,6 +379,7 @@ static int _sde_connector_get_default_dither_cfg_v1(
 	return 0;
 }
 
+
 static void _sde_connector_install_dither_property(struct drm_device *dev,
 		struct sde_kms *sde_kms, struct sde_connector *c_conn)
 {
@@ -386,6 +390,7 @@ static void _sde_connector_install_dither_property(struct drm_device *dev,
 	int ret = 0;
 	u32 version = 0, len = 0;
 	bool defalut_dither_needed = false;
+
 
 	if (!dev || !sde_kms || !c_conn) {
 		SDE_ERROR("invld args (s), dev %pK, sde_kms %pK, c_conn %pK\n",
@@ -429,28 +434,43 @@ exit:
 
 int sde_connector_get_dither_cfg(struct drm_connector *conn,
 			struct drm_connector_state *state, void **cfg,
-			size_t *len)
+			size_t *len, bool idle_pc)
 {
 	struct sde_connector *c_conn = NULL;
 	struct sde_connector_state *c_state = NULL;
 	size_t dither_sz = 0;
+	bool is_dirty;
 	u32 *p = (u32 *)cfg;
 
-	if (!conn || !state || !p)
+	if (!conn || !state || !p) {
+		SDE_ERROR("invalid arguments\n");
 		return -EINVAL;
+	}
 
 	c_conn = to_sde_connector(conn);
 	c_state = to_sde_connector_state(state);
 
-	/* try to get user config data first */
-	*cfg = msm_property_get_blob(&c_conn->property_info,
-					&c_state->property_state,
-					&dither_sz,
-					CONNECTOR_PROP_PP_DITHER);
-	/* if user config data doesn't exist, use default dither blob */
-	if (*cfg == NULL && c_conn->blob_dither) {
-		*cfg = c_conn->blob_dither->data;
-		dither_sz = c_conn->blob_dither->length;
+
+	is_dirty = msm_property_is_dirty(&c_conn->property_info,
+			&c_state->property_state,
+			CONNECTOR_PROP_PP_DITHER);
+
+	if (!is_dirty && !idle_pc) {
+		return -ENODATA;
+	} else if (is_dirty || idle_pc) {
+		*cfg = msm_property_get_blob(&c_conn->property_info,
+				&c_state->property_state,
+				&dither_sz,
+				CONNECTOR_PROP_PP_DITHER);
+		/*
+		 * In idle_pc use case return early, when dither is
+		 * already disabled.
+		 */
+		if (idle_pc && *cfg == NULL)
+			return -ENODATA;
+		/* disable dither based on user config data */
+		else if (*cfg == NULL)
+			return 0;
 	}
 	*len = dither_sz;
 	return 0;
@@ -577,6 +597,7 @@ void sde_connector_schedule_read_elvss_work(struct drm_connector *connector,
 	}
 }
 #endif
+
 
 static int _sde_connector_update_power_locked(struct sde_connector *c_conn)
 {
@@ -2042,8 +2063,6 @@ int sde_connector_esd_status(struct drm_connector *conn)
 	struct dsi_display *display;
 	int ret = 0;
 
-	return 0;
-
 	if (!conn)
 		return ret;
 
@@ -2142,6 +2161,7 @@ static void sde_connector_read_elvss_work(struct work_struct *work)
 	mutex_unlock(&conn->lock);
 
 }
+
 
 static const struct drm_connector_helper_funcs sde_connector_helper_ops = {
 	.get_modes =    sde_connector_get_modes,
@@ -2560,6 +2580,7 @@ struct drm_connector *sde_connector_init(struct drm_device *dev,
 
 	INIT_DELAYED_WORK(&c_conn->status_work,
 			sde_connector_check_status_work);
+
 	INIT_DELAYED_WORK(&c_conn->read_elvss_work,
 			sde_connector_read_elvss_work);
 

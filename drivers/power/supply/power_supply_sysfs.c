@@ -19,9 +19,6 @@
 
 #include "power_supply.h"
 
-#define SUPPORT_BATTERY_AGE
-#define SUPPORT_USER_CHARGE_OP
-
 /*
  * This is because the name "current" breaks the device attr macro.
  * The "current" word resolves to "(get_current())" so instead of
@@ -303,12 +300,6 @@ static struct device_attribute power_supply_attrs[] = {
 	POWER_SUPPLY_ATTR(capacity_raw),
 	POWER_SUPPLY_ATTR(battery_charging_enabled),
 	POWER_SUPPLY_ATTR(charging_enabled),
-#ifdef SUPPORT_BATTERY_AGE
-	POWER_SUPPLY_ATTR(age),
-#endif
-#ifdef SUPPORT_USER_CHARGE_OP
-	POWER_SUPPLY_ATTR(user_charge_op),
-#endif
 	POWER_SUPPLY_ATTR(step_charging_enabled),
 	POWER_SUPPLY_ATTR(step_charging_step),
 	POWER_SUPPLY_ATTR(pin_enabled),

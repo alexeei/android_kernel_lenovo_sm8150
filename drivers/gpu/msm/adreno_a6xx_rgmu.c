@@ -22,6 +22,7 @@
 #include "a6xx_reg.h"
 #include "adreno_a6xx.h"
 #include "adreno_trace.h"
+#include "adreno_snapshot.h"
 
 /* RGMU timeouts */
 #define RGMU_IDLE_TIMEOUT		100	/* ms */
@@ -370,8 +371,9 @@ static int a6xx_rgmu_fw_start(struct kgsl_device *device,
 		unsigned int boot_state)
 {
 	struct rgmu_device *rgmu = KGSL_RGMU_DEVICE(device);
-	const struct firmware *fw = rgmu->fw_image;
 	unsigned int status;
+	int i;
+
 
 	switch (boot_state) {
 	case GMU_COLD_BOOT:
@@ -380,8 +382,9 @@ static int a6xx_rgmu_fw_start(struct kgsl_device *device,
 		gmu_core_regwrite(device, A6XX_GMU_GENERAL_7, 1);
 
 		/* Load RGMU FW image via AHB bus */
-		gmu_core_blkwrite(device, A6XX_GMU_CM3_ITCM_START, fw->data,
-				fw->size);
+		for (i = 0; i < rgmu->fw_size; i++)
+			gmu_core_regwrite(device, A6XX_GMU_CM3_ITCM_START + i,
+					rgmu->fw_hostptr[i]);
 		/*
 		 * Enable power counter because it was disabled before
 		 * slumber.
@@ -529,7 +532,7 @@ static int a6xx_rgmu_load_firmware(struct kgsl_device *device)
 	int ret;
 
 	/* RGMU fw already saved and verified so do nothing new */
-	if (rgmu->fw_image)
+	if (rgmu->fw_hostptr)
 		return 0;
 
 	ret = request_firmware(&fw, gpucore->gpmufw_name, device->dev);
@@ -539,8 +542,15 @@ static int a6xx_rgmu_load_firmware(struct kgsl_device *device)
 		return ret;
 	}
 
-	rgmu->fw_image = fw;
-	return rgmu->fw_image ? 0 : -ENOMEM;
+
+	rgmu->fw_hostptr = devm_kmemdup(&rgmu->pdev->dev, fw->data,
+					fw->size, GFP_KERNEL);
+
+	if (rgmu->fw_hostptr)
+		rgmu->fw_size = (fw->size / sizeof(u32));
+
+	release_firmware(fw);
+	return rgmu->fw_hostptr ? 0 : -ENOMEM;
 }
 
 /* Halt RGMU execution */
@@ -571,6 +581,24 @@ static void a6xx_rgmu_halt_execution(struct kgsl_device *device)
 
 }
 
+
+/*
+ * a6xx_rgmu_snapshot() - A6XX GMU snapshot function
+ * @adreno_dev: Device being snapshotted
+ * @snapshot: Pointer to the snapshot instance
+ *
+ * This is where all of the A6XX GMU specific bits and pieces are grabbed
+ * into the snapshot memory
+ */
+static void a6xx_rgmu_snapshot(struct adreno_device *adreno_dev,
+		struct kgsl_snapshot *snapshot)
+{
+	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
+
+	adreno_snapshot_registers(device, snapshot, a6xx_rgmu_registers,
+					ARRAY_SIZE(a6xx_rgmu_registers) / 2);
+}
+
 struct gmu_dev_ops adreno_a6xx_rgmudev = {
 	.load_firmware = a6xx_rgmu_load_firmware,
 	.oob_set = a6xx_rgmu_oob_set,
@@ -583,6 +611,7 @@ struct gmu_dev_ops adreno_a6xx_rgmudev = {
 	.wait_for_lowest_idle = a6xx_rgmu_wait_for_lowest_idle,
 	.ifpc_store = a6xx_rgmu_ifpc_store,
 	.ifpc_show = a6xx_rgmu_ifpc_show,
+	.snapshot = a6xx_rgmu_snapshot,
 	.halt_execution = a6xx_rgmu_halt_execution,
 	.read_ao_counter = a6xx_gmu_read_ao_counter,
 	.gmu2host_intr_mask = RGMU_OOB_IRQ_MASK,

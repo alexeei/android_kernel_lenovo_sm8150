@@ -24,7 +24,6 @@
 #include "aux.h"
 #include "pad.h"
 
-
 static int
 nvkm_i2c_aux_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 {

@@ -1,4 +1,4 @@
-/* Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -45,12 +45,6 @@
 
 /* CAM_PERF: Used for performance (clock, BW etc) logs */
 #define CAM_PERF       (1 << 25)
-#ifdef CONFIG_PRODUCT_HEART
-#define CAM_POWER      (1 << 26)
-#endif
-#ifdef CONFIG_PRODUCT_ZIPPO
-#define CAM_POWER      (1 << 26)
-#endif
 
 #define CAM_HYP        (1 << 26)
 #define CAM_IR_LED     (1 << 27)
@@ -90,7 +84,7 @@ const char *cam_get_module_name(unsigned int module_id);
  * @args     :  Arguments which needs to be print in log
  */
 #define CAM_ERR(__module, fmt, args...)                            \
-	pr_debug("CAM_ERR: %s: %s: %d " fmt "\n",                     \
+	pr_err("CAM_ERR: %s: %s: %d " fmt "\n",                     \
 		cam_get_module_name(__module), __func__,  __LINE__, ##args)
 /*
  * CAM_WARN
@@ -101,7 +95,7 @@ const char *cam_get_module_name(unsigned int module_id);
  * @args     :  Arguments which needs to be print in log
  */
 #define CAM_WARN(__module, fmt, args...)                           \
-	pr_debug("CAM_WARN: %s: %s: %d " fmt "\n",                     \
+	pr_warn("CAM_WARN: %s: %s: %d " fmt "\n",                     \
 		cam_get_module_name(__module), __func__,  __LINE__, ##args)
 /*
  * CAM_INFO
@@ -112,7 +106,7 @@ const char *cam_get_module_name(unsigned int module_id);
  * @args     :  Arguments which needs to be print in log
  */
 #define CAM_INFO(__module, fmt, args...)                           \
-	pr_debug("CAM_INFO: %s: %s: %d " fmt "\n",                     \
+	pr_info("CAM_INFO: %s: %s: %d " fmt "\n",                     \
 		cam_get_module_name(__module), __func__,  __LINE__, ##args)
 
 /*
@@ -124,7 +118,7 @@ const char *cam_get_module_name(unsigned int module_id);
  * @args     :  Arguments which needs to be print in log
  */
 #define CAM_INFO_RATE_LIMIT(__module, fmt, args...)                 \
-	pr_debug_ratelimited("CAM_INFO: %s: %s: %d " fmt "\n",            \
+	pr_info_ratelimited("CAM_INFO: %s: %s: %d " fmt "\n",            \
 		cam_get_module_name(__module), __func__,  __LINE__, ##args)
 
 /*
@@ -143,7 +137,7 @@ const char *cam_get_module_name(unsigned int module_id);
 			(interval * HZ),				\
 			burst);						\
 		if (__ratelimit(&_rs))					\
-			pr_debug("CAM_INFO: %s: %s: %d " fmt "\n",	\
+			pr_info("CAM_INFO: %s: %s: %d " fmt "\n",	\
 				cam_get_module_name(__module), __func__,\
 				__LINE__, ##args);			\
 	})
@@ -164,7 +158,7 @@ const char *cam_get_module_name(unsigned int module_id);
  * @brief    :  This Macro will print error print logs with ratelimit
  */
 #define CAM_ERR_RATE_LIMIT(__module, fmt, args...)                 \
-	pr_debug_ratelimited("CAM_ERR: %s: %s: %d " fmt "\n",            \
+	pr_err_ratelimited("CAM_ERR: %s: %s: %d " fmt "\n",            \
 		cam_get_module_name(__module), __func__,  __LINE__, ##args)
 
 /*
@@ -183,36 +177,9 @@ const char *cam_get_module_name(unsigned int module_id);
 			(interval * HZ),				\
 			burst);						\
 		if (__ratelimit(&_rs))					\
-			pr_debug("CAM_ERR: %s: %s: %d " fmt "\n",		\
+			pr_err("CAM_ERR: %s: %s: %d " fmt "\n",		\
 				cam_get_module_name(__module), __func__,\
 				__LINE__, ##args);			\
 	})
-
-#ifdef CONFIG_PRODUCT_HEART
-#include <linux/ratelimit.h>
-#include <asm-generic/param.h>
-
-#define DEFAULT_RATELIMIT_INTERVAL_BY_USER	(20 * HZ)
-#define DEFAULT_RATELIMIT_BURST_BY_USER		10
-
-#ifdef CONFIG_PRINTK
-#define pr_err_ratelimited_by_user(fmt, ...)					\
-({									\
-	static DEFINE_RATELIMIT_STATE(_rs,				\
-				      DEFAULT_RATELIMIT_INTERVAL_BY_USER,	\
-				      DEFAULT_RATELIMIT_BURST_BY_USER);		\
-									\
-	if (__ratelimit(&_rs))						\
-		printk(fmt, ##__VA_ARGS__);				\
-})
-#else
-#define pr_err_ratelimited_by_user(fmt, ...)					\
-	no_printk(fmt, ##__VA_ARGS__)
-#endif
-
-#define CAM_ERR_RATE_LIMIT_BY_USER(__module, fmt, args...)		\
-	pr_err_ratelimited_by_user("CAM_ERR: %s: %s: %d " fmt "\n",		\
-		cam_get_module_name(__module), __func__,  __LINE__, ##args)
-#endif
 
 #endif /* _CAM_DEBUG_UTIL_H_ */

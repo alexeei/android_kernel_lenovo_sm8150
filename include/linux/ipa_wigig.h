@@ -50,7 +50,6 @@ struct ipa_wigig_init_in_params {
 struct ipa_wigig_init_out_params {
 	bool is_uc_ready;
 	phys_addr_t uc_db_pa;
-	bool lan_rx_napi_enable;
 };
 
 /*

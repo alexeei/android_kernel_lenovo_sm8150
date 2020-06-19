@@ -20,6 +20,10 @@
 *.elf
 *.gcno
 *.gz
+<<<<<<< HEAD
+=======
+*.i
+>>>>>>> origin1/kernel.lnx.4.14.r4-rel
 *.ko
 *.ll
 *.lst
@@ -124,6 +128,9 @@ all.config
 
 # fetched Android config fragments
 kernel/configs/android-*.cfg
+<<<<<<< HEAD
 
 # Out folder
 out/*
+=======
+>>>>>>> origin1/kernel.lnx.4.14.r4-rel

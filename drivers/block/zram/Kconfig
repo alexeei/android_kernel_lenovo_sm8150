@@ -89,3 +89,4 @@ config ZRAM_SIZE_OVERRIDE
 	int "zram size to set from kernel"
 	range 1 8
 	default 1
+

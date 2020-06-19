@@ -48,6 +48,7 @@
 
 DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 
+
 #if defined(CONFIG_SCHED_DEBUG) && defined(HAVE_JUMP_LABEL)
 /*
  * Debugging: various feature bits
@@ -64,11 +65,14 @@ const_debug unsigned int sysctl_sched_features =
 #undef SCHED_FEAT
 #endif
 
+
 /*
  * Number of tasks to iterate in a single balance run.
  * Limited because this is done with IRQs disabled.
  */
-const_debug unsigned int sysctl_sched_nr_migrate = NR_CPUS;
+
+const_debug unsigned int sysctl_sched_nr_migrate = 32;
+
 
 /*
  * period over which we average the RT time consumption, measured
@@ -148,6 +152,7 @@ struct rq *task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 		 * If we observe the new CPU in task_rq_lock(), the address
 		 * dependency headed by '[L] rq = task_rq()' and the acquire
 		 * will pair with the WMB to ensure we then also see migrating.
+
 		 */
 		if (likely(rq == task_rq(p) && !task_on_rq_migrating(p))) {
 			rq_pin_lock(rq, rf);
@@ -434,6 +439,7 @@ static bool set_nr_if_polling(struct task_struct *p)
 #endif
 
 static bool __wake_q_add(struct wake_q_head *head, struct task_struct *task)
+
 {
 	struct wake_q_node *node = &task->wake_q;
 
@@ -446,6 +452,7 @@ static bool __wake_q_add(struct wake_q_head *head, struct task_struct *task)
 	 * state, even in the failed case, an explicit smp_mb() must be used.
 	 */
 	smp_mb__before_atomic();
+
 	if (unlikely(cmpxchg_relaxed(&node->next, NULL, WAKE_Q_TAIL)))
 		return false;
 
@@ -456,6 +463,7 @@ static bool __wake_q_add(struct wake_q_head *head, struct task_struct *task)
 	 */
 	*head->lastp = node;
 	head->lastp = &node->next;
+
 	return true;
 }
 
@@ -498,6 +506,7 @@ void wake_q_add_safe(struct wake_q_head *head, struct task_struct *task)
 {
 	if (!__wake_q_add(head, task))
 		put_task_struct(task);
+
 }
 
 static int
@@ -1016,7 +1025,9 @@ static struct rq *move_queued_task(struct rq *rq, struct rq_flags *rf,
 {
 	lockdep_assert_held(&rq->lock);
 
+
 	WRITE_ONCE(p->on_rq, TASK_ON_RQ_MIGRATING);
+
 	dequeue_task(rq, p, DEQUEUE_NOCLOCK);
 	double_lock_balance(rq, cpu_rq(new_cpu));
 	set_task_cpu(p, new_cpu);
@@ -1741,6 +1752,7 @@ ttwu_stat(struct task_struct *p, int cpu, int wake_flags)
 
 #ifdef CONFIG_SMP
 	if (cpu == rq->cpu) {
+
 		__schedstat_inc(rq->ttwu_local);
 		__schedstat_inc(p->se.statistics.nr_wakeups_local);
 	} else {
@@ -1751,6 +1763,7 @@ ttwu_stat(struct task_struct *p, int cpu, int wake_flags)
 		for_each_domain(rq->cpu, sd) {
 			if (cpumask_test_cpu(cpu, sched_domain_span(sd))) {
 				__schedstat_inc(sd->ttwu_wake_remote);
+
 				break;
 			}
 		}
@@ -1758,6 +1771,7 @@ ttwu_stat(struct task_struct *p, int cpu, int wake_flags)
 	}
 
 	if (wake_flags & WF_MIGRATED)
+
 		__schedstat_inc(p->se.statistics.nr_wakeups_migrate);
 #endif /* CONFIG_SMP */
 
@@ -1766,6 +1780,7 @@ ttwu_stat(struct task_struct *p, int cpu, int wake_flags)
 
 	if (wake_flags & WF_SYNC)
 		__schedstat_inc(p->se.statistics.nr_wakeups_sync);
+
 }
 
 static inline void ttwu_activate(struct rq *rq, struct task_struct *p, int en_flags)
@@ -2125,6 +2140,7 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags,
 	unsigned long flags;
 	int cpu, success = 0;
 
+
 	preempt_disable();
 	if (p == current) {
 		/*
@@ -2149,6 +2165,7 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags,
 		goto out;
 	}
 
+
 	/*
 	 * If we are going to wake up a thread waiting for CONDITION we
 	 * need to ensure that CONDITION=1 done by the caller can not be
@@ -2158,7 +2175,9 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags,
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
 	smp_mb__after_spinlock();
 	if (!(p->state & state))
+
 		goto unlock;
+
 
 	trace_sched_waking(p);
 
@@ -2189,7 +2208,9 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags,
 	 */
 	smp_rmb();
 	if (p->on_rq && ttwu_remote(p, wake_flags))
+
 		goto unlock;
+
 
 #ifdef CONFIG_SMP
 	/*
@@ -2250,12 +2271,14 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags,
 #endif /* CONFIG_SMP */
 
 	ttwu_queue(p, cpu, wake_flags);
+
 unlock:
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 out:
 	if (success)
 		ttwu_stat(p, cpu, wake_flags);
 	preempt_enable();
+
 
 	if (success && sched_predl) {
 		raw_spin_lock_irqsave(&cpu_rq(cpu)->lock, flags);
@@ -2816,6 +2839,7 @@ static inline void finish_lock_switch(struct rq *rq)
 	raw_spin_unlock_irq(&rq->lock);
 }
 
+
 /**
  * prepare_task_switch - prepare to switch tasks
  * @rq: the runqueue preparing to switch
@@ -2836,7 +2860,9 @@ prepare_task_switch(struct rq *rq, struct task_struct *prev,
 	sched_info_switch(rq, prev, next);
 	perf_event_task_sched_out(prev, next);
 	fire_sched_out_preempt_notifiers(prev, next);
+
 	prepare_task(next);
+
 	prepare_arch_switch(next);
 }
 
@@ -2910,6 +2936,7 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 	smp_mb__after_unlock_lock();
 	finish_task(prev);
 	finish_lock_switch(rq);
+
 	finish_arch_post_lock_switch();
 
 	fire_sched_in_preempt_notifiers(current);
@@ -5029,12 +5056,15 @@ out_put_task:
 
 char sched_lib_name[LIB_PATH_LENGTH];
 
+
+
 unsigned int sched_lib_mask_force;
 bool is_sched_lib_based_app(pid_t pid)
 {
 	const char *name = NULL;
 	struct vm_area_struct *vma;
 	char path_buf[LIB_PATH_LENGTH];
+
 	bool found = false;
 	struct task_struct *p;
 	struct mm_struct *mm;
@@ -5042,11 +5072,13 @@ bool is_sched_lib_based_app(pid_t pid)
 	if (strnlen(sched_lib_name, LIB_PATH_LENGTH) == 0)
 		return false;
 
+
 	rcu_read_lock();
 
 	p = find_process_by_pid(pid);
 	if (!p) {
 		rcu_read_unlock();
+
 		return false;
 	}
 
@@ -5066,10 +5098,12 @@ bool is_sched_lib_based_app(pid_t pid)
 			if (IS_ERR(name))
 				goto release_sem;
 
+
 			if (strnstr(name, sched_lib_name,
 					strnlen(name, LIB_PATH_LENGTH))) {
 				found = true;
 				break;
+
 			}
 		}
 	}
@@ -5081,6 +5115,7 @@ put_task_struct:
 	put_task_struct(p);
 	return found;
 }
+
 
 
 
@@ -5230,6 +5265,7 @@ int __sched _cond_resched(void)
 		return 1;
 	}
 	rcu_all_qs();
+
 	return 0;
 }
 EXPORT_SYMBOL(_cond_resched);
@@ -5553,7 +5589,9 @@ void sched_show_task(struct task_struct *p)
 	show_stack(p, NULL);
 	put_task_stack(p);
 }
+
 EXPORT_SYMBOL_GPL(sched_show_task);
+
 
 static inline bool
 state_filter_match(unsigned long state_filter, struct task_struct *p)
@@ -6336,6 +6374,7 @@ int sched_cpu_deactivate(unsigned int cpu)
 	 *
 	 * Do sync before park smpboot threads to take care the rcu boost case.
 	 */
+
 	synchronize_rcu();
 
 #ifdef CONFIG_SCHED_SMT
@@ -6610,6 +6649,7 @@ void __init sched_init(void)
 		rq->max_idle_balance_cost = sysctl_sched_migration_cost;
 		rq->push_task = NULL;
 		rq->extra_flags = 0;
+
 		walt_sched_init_rq(rq);
 
 		INIT_LIST_HEAD(&rq->cfs_tasks);

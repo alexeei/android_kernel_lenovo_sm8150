@@ -645,20 +645,27 @@ int cpuidle_register(struct cpuidle_driver *drv,
 EXPORT_SYMBOL_GPL(cpuidle_register);
 
 #ifdef CONFIG_SMP
-static atomic_t idle_cpu_mask = ATOMIC_INIT(0);
 
-#if NR_CPUS > 32
-#error idle_cpu_mask not big enough for NR_CPUS
-#endif
 
-static void cpuidle_set_idle_cpu(unsigned int cpu)
+static void wake_up_idle_cpus(void *v)
 {
-	atomic_or(BIT(cpu), &idle_cpu_mask);
-}
+	int cpu;
+	struct cpumask cpus;
 
-static void cpuidle_clear_idle_cpu(unsigned int cpu)
-{
-	atomic_andnot(BIT(cpu), &idle_cpu_mask);
+	preempt_disable();
+	if (v) {
+		cpumask_andnot(&cpus, v, cpu_isolated_mask);
+		cpumask_and(&cpus, &cpus, cpu_online_mask);
+	} else
+		cpumask_andnot(&cpus, cpu_online_mask, cpu_isolated_mask);
+
+	for_each_cpu(cpu, &cpus) {
+		if (cpu == smp_processor_id())
+			continue;
+		wake_up_if_idle(cpu);
+	}
+	preempt_enable();
+
 }
 
 /*
@@ -670,27 +677,8 @@ static void cpuidle_clear_idle_cpu(unsigned int cpu)
 static int cpuidle_latency_notify(struct notifier_block *b,
 		unsigned long l, void *v)
 {
-	static unsigned long prev_latency[NR_CPUS] = {
-		[0 ... NR_CPUS - 1] = PM_QOS_CPU_DMA_LAT_DEFAULT_VALUE
-	};
-	struct cpumask update_mask = CPU_MASK_NONE;
-	unsigned int cpu;
 
-	/* Only send an IPI when the CPU latency requirement is tightened */
-	for_each_cpu(cpu, v) {
-		if (l < prev_latency[cpu])
-			cpumask_set_cpu(cpu, &update_mask);
-		prev_latency[cpu] = l;
-	}
-
-	if (!cpumask_empty(&update_mask)) {
-		unsigned long idle_cpus = atomic_read(&idle_cpu_mask);
-		cpumask_and(&update_mask, &update_mask, to_cpumask(&idle_cpus));
-		cpumask_andnot(&update_mask, &update_mask, cpu_isolated_mask);
-
-		/* Notifier is called with preemption disabled */
-		arch_send_call_function_ipi_mask(&update_mask);
-	}
+	wake_up_idle_cpus(v);
 
 	return NOTIFY_OK;
 }
@@ -706,13 +694,6 @@ static inline void latency_notifier_init(struct notifier_block *n)
 
 #else /* CONFIG_SMP */
 
-static void cpuidle_set_idle_cpu(unsigned int cpu)
-{
-}
-
-static void cpuidle_clear_idle_cpu(unsigned int cpu)
-{
-}
 
 #define latency_notifier_init(x) do { } while (0)
 

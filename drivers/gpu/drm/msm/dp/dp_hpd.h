@@ -20,19 +20,32 @@
 #include <linux/device.h>
 #include "dp_parser.h"
 #include "dp_catalog.h"
+<<<<<<< HEAD
+=======
+#include <soc/qcom/msm_dp_aux_bridge.h>
+>>>>>>> origin1/kernel.lnx.4.14.r4-rel
 
 /**
  * enum dp_hpd_type - dp hpd type
  * @DP_HPD_USBPD:   USB type-c based HPD
  * @DP_HPD_GPIO:    GPIO based HPD
+<<<<<<< HEAD
  * @DP_HPD_BUILTIN: Controller built-in HPD
+=======
+ * @DP_HPD_LPHW:    LPHW based HPD
+ * @DP_HPD_BRIDGE:  External bridge HPD
+>>>>>>> origin1/kernel.lnx.4.14.r4-rel
  */
 
 enum dp_hpd_type {
 	DP_HPD_USBPD,
 	DP_HPD_GPIO,
 	DP_HPD_LPHW,
+<<<<<<< HEAD
 	DP_HPD_BUILTIN,
+=======
+	DP_HPD_BRIDGE,
+>>>>>>> origin1/kernel.lnx.4.14.r4-rel
 };
 
 /**
@@ -90,6 +103,10 @@ struct dp_hpd {
  * @parser: pointer to DP parser module
  * @catalog: pointer to DP catalog module
  * @pd: handle for the ubspd driver data
+<<<<<<< HEAD
+=======
+ * @bridge: handle for bridge driver data
+>>>>>>> origin1/kernel.lnx.4.14.r4-rel
  * @cb: callback function for HPD response
  * return: pointer to allocated hpd module data
  *
@@ -97,6 +114,10 @@ struct dp_hpd {
  */
 struct dp_hpd *dp_hpd_get(struct device *dev, struct dp_parser *parser,
 		struct dp_catalog_hpd *catalog, struct usbpd *pd,
+<<<<<<< HEAD
+=======
+		struct msm_dp_aux_bridge *aux_bridge,
+>>>>>>> origin1/kernel.lnx.4.14.r4-rel
 		struct dp_hpd_cb *cb);
 
 /**
