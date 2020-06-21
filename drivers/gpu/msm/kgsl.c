@@ -5130,7 +5130,7 @@ static int __init kgsl_core_init(void)
 {
 	int result = 0;
 
-	struct sched_param param = { .sched_priority = 2 };
+	struct sched_param param = { .sched_priority = 16 };
 
 
 	/* alloc major and minor device numbers */
