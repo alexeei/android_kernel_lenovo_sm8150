@@ -1666,7 +1666,7 @@ static inline void adreno_debugfs_init(struct adreno_device *adreno_dev) { }
 static inline void adreno_context_debugfs_init(struct adreno_device *device,
 						struct adreno_context *context)
 						{ }
-
+#endif
 /**
  * adreno_compare_pm4_version() - Compare the PM4 microcode version
  * @adreno_dev: Pointer to the adreno_device struct
