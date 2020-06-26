@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2020, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -82,9 +82,6 @@ const char *ipa3_event_name[] = {
 	__stringify(IPA_GSB_DISCONNECT),
 	__stringify(IPA_COALESCE_ENABLE),
 	__stringify(IPA_COALESCE_DISABLE),
-	__stringify(IPA_PDN_DEFAULT_MODE_CONFIG),
-	__stringify(IPA_PDN_IP_COLLISION_MODE_CONFIG),
-	__stringify(IPA_PDN_IP_PASSTHROUGH_MODE_CONFIG),
 };
 
 const char *ipa3_hdr_l2_type_name[] = {
@@ -157,7 +154,7 @@ static ssize_t ipa3_write_ep_holb(struct file *file,
 	unsigned long missing;
 	char *sptr, *token;
 
-	if (sizeof(dbg_buff) < count + 1)
+	if (sizeof(dbg_buff) < count)
 		return -EFAULT;
 
 	missing = copy_from_user(dbg_buff, buf, min(sizeof(dbg_buff), count));
@@ -200,7 +197,7 @@ static ssize_t ipa3_write_ep_reg(struct file *file, const char __user *buf,
 	unsigned long missing;
 	s8 option = 0;
 
-	if (sizeof(dbg_buff) < count + 1)
+	if (sizeof(dbg_buff) < count)
 		return -EFAULT;
 
 	missing = copy_from_user(dbg_buff, buf, min(sizeof(dbg_buff), count));
@@ -339,7 +336,7 @@ static ssize_t ipa3_write_keep_awake(struct file *file, const char __user *buf,
 	s8 option = 0;
 	uint32_t bw_mbps = 0;
 
-	if (sizeof(dbg_buff) < count + 1)
+	if (sizeof(dbg_buff) < count)
 		return -EFAULT;
 
 	missing = copy_from_user(dbg_buff, buf, min(sizeof(dbg_buff), count));
@@ -1573,7 +1570,7 @@ static ssize_t ipa3_write_dbg_cnt(struct file *file, const char __user *buf,
 		return -EPERM;
 	}
 
-	if (sizeof(dbg_buff) < count + 1)
+	if (sizeof(dbg_buff) < count)
 		return -EFAULT;
 
 	missing = copy_from_user(dbg_buff, buf, min(sizeof(dbg_buff), count));
@@ -2575,7 +2572,7 @@ static ssize_t ipa3_clear_active_clients_log(struct file *file,
 	unsigned long missing;
 		s8 option = 0;
 
-	if (sizeof(dbg_buff) < count + 1)
+	if (sizeof(dbg_buff) < count)
 		return -EFAULT;
 
 	missing = copy_from_user(dbg_buff, ubuf, min(sizeof(dbg_buff), count));
@@ -2597,7 +2594,7 @@ static ssize_t ipa3_enable_ipc_low(struct file *file,
 	unsigned long missing;
 	s8 option = 0;
 
-	if (sizeof(dbg_buff) < count + 1)
+	if (sizeof(dbg_buff) < count)
 		return -EFAULT;
 
 	missing = copy_from_user(dbg_buff, ubuf, min(sizeof(dbg_buff), count));

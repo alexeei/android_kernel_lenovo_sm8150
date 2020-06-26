@@ -52,16 +52,6 @@
 	/delete-property/ qcom,smmu-s1-bypass;
 };
 
-
-&mdss_dsi0_pll {
-	compatible = "qcom,mdss_dsi_pll_7nm_v2";
-};
-
-&mdss_dsi1_pll {
-	compatible = "qcom,mdss_dsi_pll_7nm_v2";
-};
-
-
 &spss_utils {
 	qcom,spss-dev-firmware-name  = "spss2d";	/* 8 chars max */
 	qcom,spss-test-firmware-name = "spss2t";	/* 8 chars max */
@@ -615,9 +605,11 @@
 		<26 512 0 5407000>,    // 8 bus=1353
 		<26 512 0 6215000>,    // 9 bus=1555
 		<26 512 0 7211000>,    // 10 bus=1804
-		<26 512 0 8363000>;    // 11 bus=2092
+		<26 512 0 8363000>;    // 11 bus=2094
 
 	/delete-property/qcom,initial-pwrlevel;
+
+	qcom,initial-pwrlevel = <7>;
 
 	operating-points-v2 = <&gpu_opp_table_v2>;
 
@@ -705,6 +697,7 @@
 		qcom,gpu-pwrlevels-1 {
 			#address-cells = <1>;
 			#size-cells = <0>;
+
 			qcom,speed-bin = <0>;
 			qcom,initial-pwrlevel = <6>;
 
@@ -1003,7 +996,7 @@
 		BW_OPP_ENTRY(1353, 4); /* 5161 MB/s */
 		BW_OPP_ENTRY(1555, 4); /* 5931 MB/s */
 		BW_OPP_ENTRY(1804, 4); /* 6881 MB/s */
-		BW_OPP_ENTRY(2092, 4); /* 7980 MB/s */
+		BW_OPP_ENTRY(2094, 4); /* 7980 MB/s */
 	};
 
 	suspendable_ddr_bw_opp_table: suspendable-ddr-bw-opp-table {
@@ -1019,7 +1012,7 @@
 		BW_OPP_ENTRY(1353, 4); /* 5161 MB/s */
 		BW_OPP_ENTRY(1555, 4); /* 5931 MB/s */
 		BW_OPP_ENTRY(1804, 4); /* 6881 MB/s */
-		BW_OPP_ENTRY(2092, 4); /* 7980 MB/s */
+		BW_OPP_ENTRY(2094, 4); /* 7980 MB/s */
 	};
 };
 &cpu4_computemon {
@@ -1048,7 +1041,7 @@
 		< 1612800 MHZ_TO_MBPS(1353, 4) >,
 		< 1804800 MHZ_TO_MBPS(1555, 4) >,
 		< 2649600 MHZ_TO_MBPS(1804, 4) >,
-		< 3000000 MHZ_TO_MBPS(2092, 4) >;
+		< 3000000 MHZ_TO_MBPS(2094, 4) >;
 };
 
 &cpu0_cpu_l3_latmon {
@@ -1077,8 +1070,8 @@
 		< 1401600  998400000 >,
 		< 1708800 1267200000 >,
 		< 2016000 1344000000 >,
-		< 2419200 1536000000 >,
-		< 2841600 1612800000 >;
+		< 2227200 1536000000 >,
+		< 2419200 1612800000 >;
 };
 
 &cpu7_cpu_l3_latmon {

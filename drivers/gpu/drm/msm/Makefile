@@ -23,11 +23,6 @@ msm_drm-y := \
 	dp/dp_audio.o \
 	dp/dp_debug.o \
 	dp/dp_hpd.o \
-	dp/dp_mst_sim_helper.o \
-	dp/dp_mst_sim.o \
-	dp/dp_hpd.o \
-	dp/dp_aux_bridge.o \
-	dp/dp_bridge_hpd.o \
 	dp/dp_gpio_hpd.o \
 	dp/dp_lphw_hpd.o \
 	dp/dp_display.o \
@@ -48,8 +43,6 @@ msm_drm-y := \
 	sde/sde_connector.o \
 	sde/sde_color_processing.o \
 	sde/sde_vbif.o \
-	sde_dbg.o \
-	sde_dbg_evtlog.o \
 	sde_io_util.o \
 	sde/sde_hw_reg_dma_v1_color_proc.o \
 	sde/sde_hw_color_proc_v4.o \
@@ -223,4 +216,3 @@ msm_drm-$(CONFIG_DRM_MSM) += \
 obj-$(CONFIG_DRM_MSM)	+= msm_drm.o
 
 msm_drm-$(CONFIG_EXPOSURE_ADJUSTMENT) += dsi-staging/exposure_adjustment.o
-

@@ -32,7 +32,6 @@
 #include <linux/tick.h>
 #include <linux/sched/topology.h>
 #include <linux/sched/sysctl.h>
-
 #include <trace/events/power.h>
 
 static LIST_HEAD(cpufreq_policy_list);
@@ -658,6 +657,7 @@ static ssize_t show_##file_name				\
 }
 
 show_one(cpuinfo_min_freq, cpuinfo.min_freq);
+
 show_one(cpuinfo_transition_latency, cpuinfo.transition_latency);
 show_one(scaling_min_freq, min);
 show_one(scaling_max_freq, max);
@@ -1905,7 +1905,6 @@ unsigned int cpufreq_driver_fast_switch(struct cpufreq_policy *policy,
 	target_freq = clamp_val(target_freq, policy->min, policy->max);
 
         ret = cpufreq_driver->fast_switch(policy, target_freq);
-
 	if (ret) {
 		cpufreq_times_record_transition(policy, ret);
 		cpufreq_stats_record_transition(policy, ret);
@@ -2265,12 +2264,11 @@ static int cpufreq_set_policy(struct cpufreq_policy *policy,
 
         /* Limit little cluster frequency to 403MHz */
         if (cpumask_test_cpu(policy->cpu, cpu_lp_mask))
-		cpufreq_verify_within_limits(policy,policy->cpuinfo.min_freq, 300000);
+		cpufreq_verify_within_limits(policy,policy->cpuinfo.min_freq, 403200);
 
          /* Limit BIG cluster minimum frequency to 825MHz */
          if (cpumask_test_cpu(policy->cpu, cpu_perf_mask))
-		cpufreq_verify_within_limits(policy,policy->cpuinfo.min_freq, 710000);
-
+		cpufreq_verify_within_limits(policy,policy->cpuinfo.min_freq, 825600);
 
 	/* adjust if necessary - all reasons */
 	blocking_notifier_call_chain(&cpufreq_policy_notifier_list,

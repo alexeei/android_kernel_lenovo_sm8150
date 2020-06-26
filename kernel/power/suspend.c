@@ -50,7 +50,6 @@ static const char * const mem_sleep_labels[] = {
 const char *mem_sleep_states[PM_SUSPEND_MAX];
 
 suspend_state_t mem_sleep_current = PM_SUSPEND_TO_IDLE;
-
 suspend_state_t mem_sleep_default = PM_SUSPEND_TO_IDLE;
 suspend_state_t pm_suspend_target_state;
 EXPORT_SYMBOL_GPL(pm_suspend_target_state);
@@ -151,7 +150,6 @@ static void s2idle_loop(void)
 
 		pm_wakeup_clear(false);
 		clear_wakeup_reasons();
-
 	}
 
 	pm_pr_dbg("resume from suspend-to-idle\n");
@@ -461,7 +459,6 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 		}
 
 		start_logging_wakeup_reasons();
-
 		syscore_resume();
 	}
 

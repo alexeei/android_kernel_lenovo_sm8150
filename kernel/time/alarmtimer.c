@@ -71,9 +71,7 @@ static void alarmtimer_triggered_func(void *p)
 
 	if (!(rtc->irq_data & RTC_AF))
 		return;
-
 	__pm_wakeup_event(ws, MSEC_PER_SEC / 2);
-
 }
 
 static struct rtc_task alarmtimer_rtc_task = {
@@ -315,7 +313,6 @@ static int alarmtimer_suspend(struct device *dev)
 
 	if (ktime_to_ns(min) < NSEC_PER_SEC / 2) {
 		__pm_wakeup_event(ws, MSEC_PER_SEC / 2);
-
 		return -EBUSY;
 	}
 
@@ -330,9 +327,7 @@ static int alarmtimer_suspend(struct device *dev)
 	/* Set alarm, if in the past reject suspend briefly to handle */
 	ret = rtc_timer_start(rtc, &rtctimer, now, 0);
 	if (ret < 0)
-
 		__pm_wakeup_event(ws, MSEC_PER_SEC / 2);
-
 	return ret;
 }
 

@@ -96,9 +96,6 @@
  */
 #define MDP_LAYER_MULTIRECT_PARALLEL_MODE	0x2000
 
-/* Flag indicates that layer is associated with secure camera session */
-
-#define MDP_LAYER_SECURE_CAMERA_SESSION		0x4000
 /*
  * DESTINATION SCALER FLAG CONFIGURATION
  */

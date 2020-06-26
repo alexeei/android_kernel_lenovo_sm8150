@@ -1,4 +1,4 @@
-/* Copyright (c) 2019-2020 The Linux Foundation. All rights reserved.
+/* Copyright (c) 2019 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -212,7 +212,6 @@
 /* Need to define max ILIM for smb1398 */
 #define DIV2_MAX_ILIM_UA		3200000
 #define DIV2_MAX_ILIM_DUAL_CP_UA	6400000
-#define DIV2_ILIM_CFG_PCT		105
 
 #define TAPER_STEPPER_UA_DEFAULT	100000
 #define TAPER_STEPPER_UA_IN_CC_MODE	200000
@@ -318,12 +317,6 @@ struct smb1398_chip {
 	u32			pl_input_mode;
 	enum isns_mode		current_capability;
 	int			cc_mode_taper_main_icl_ua;
-	int			cp_status1;
-	int			cp_status2;
-	int			cp_enable;
-	int			cp_isns_master;
-	int			cp_isns_slave;
-	int			cp_ilim;
 
 	bool			status_change_running;
 	bool			taper_work_running;
@@ -500,7 +493,7 @@ static int smb1398_get_die_temp(struct smb1398_chip *chip, int *temp)
 		dev_err(chip->dev, "Couldn't read die_temp_chan, rc=%d\n", rc);
 	} else {
 		*temp = die_temp_deciC / 100;
-		dev_dbg(chip->dev, "die temp %d\n", *temp);
+		dev_dbg(chip->dev, "Couldn't get die temp %d\n", *temp);
 	}
 
 	return rc;
@@ -841,45 +834,6 @@ static enum power_supply_property div2_cp_master_props[] = {
 	POWER_SUPPLY_PROP_MIN_ICL,
 };
 
-static int div2_cp_master_get_prop_suspended(struct smb1398_chip *chip,
-				enum power_supply_property prop,
-				union power_supply_propval *val)
-{
-	switch (prop) {
-	case POWER_SUPPLY_PROP_CP_STATUS1:
-		val->intval = chip->cp_status1;
-		break;
-	case POWER_SUPPLY_PROP_CP_STATUS2:
-		val->intval = chip->cp_status2;
-		break;
-	case POWER_SUPPLY_PROP_CP_ENABLE:
-		val->intval = chip->cp_enable;
-		break;
-	case POWER_SUPPLY_PROP_CP_SWITCHER_EN:
-		val->intval = chip->switcher_en;
-		break;
-	case POWER_SUPPLY_PROP_CP_DIE_TEMP:
-		val->intval = chip->die_temp;
-		break;
-	case POWER_SUPPLY_PROP_CP_ISNS:
-		val->intval = chip->cp_isns_master;
-		break;
-	case POWER_SUPPLY_PROP_CP_ISNS_SLAVE:
-		val->intval = chip->cp_isns_slave;
-		break;
-	case POWER_SUPPLY_PROP_CP_IRQ_STATUS:
-		val->intval = chip->div2_irq_status;
-		break;
-	case POWER_SUPPLY_PROP_CP_ILIM:
-		val->intval = chip->cp_ilim;
-		break;
-	default:
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
 static int div2_cp_master_get_prop(struct power_supply *psy,
 				enum power_supply_property prop,
 				union power_supply_propval *val)
@@ -888,32 +842,21 @@ static int div2_cp_master_get_prop(struct power_supply *psy,
 	int rc = 0, ilim_ma, temp, isns_ua;
 	u8 status;
 
-	/*
-	 * Return the cached values when the system is in suspend state
-	 * instead of reading the registers to avoid read failures.
-	 */
-	if (chip->in_suspend) {
-		rc = div2_cp_master_get_prop_suspended(chip, prop, val);
-		if (!rc)
-			return rc;
-		rc = 0;
-	}
-
 	switch (prop) {
 	case POWER_SUPPLY_PROP_CP_STATUS1:
 		rc = smb1398_div2_cp_get_status1(chip, &status);
 		if (!rc)
-			chip->cp_status1 = val->intval = status;
+			val->intval = status;
 		break;
 	case POWER_SUPPLY_PROP_CP_STATUS2:
 		rc = smb1398_div2_cp_get_status2(chip, &status);
 		if (!rc)
-			chip->cp_status2 = val->intval = status;
+			val->intval = status;
 		break;
 	case POWER_SUPPLY_PROP_CP_ENABLE:
 		rc = smb1398_get_enable_status(chip);
 		if (!rc)
-			chip->cp_enable = val->intval = chip->smb_en &&
+			val->intval = chip->smb_en &&
 				!get_effective_result(
 						chip->div2_cp_disable_votable);
 		break;
@@ -925,27 +868,27 @@ static int div2_cp_master_get_prop(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CP_ISNS:
 		rc = smb1398_div2_cp_get_master_isns(chip, &isns_ua);
 		if (rc >= 0)
-			chip->cp_isns_master = val->intval = isns_ua;
+			val->intval = isns_ua;
 		break;
 	case POWER_SUPPLY_PROP_CP_ISNS_SLAVE:
 		rc = smb1398_div2_cp_get_slave_isns(chip, &isns_ua);
 		if (rc >= 0)
-			chip->cp_isns_slave = val->intval = isns_ua;
+			val->intval = isns_ua;
 		break;
 	case POWER_SUPPLY_PROP_CP_TOGGLE_SWITCHER:
 		val->intval = 0;
 		break;
 	case POWER_SUPPLY_PROP_CP_DIE_TEMP:
-		rc = smb1398_get_die_temp(chip, &temp);
-		if (rc >= 0) {
-			val->intval = temp;
-			if (temp <= THERMAL_SUSPEND_DECIDEGC)
+		if (!chip->in_suspend) {
+			rc = smb1398_get_die_temp(chip, &temp);
+			if ((rc >= 0) && (temp <= THERMAL_SUSPEND_DECIDEGC))
 				chip->die_temp = temp;
-			else if (chip->die_temp == -ENODATA)
-				rc = -ENODATA;
-			else
-				val->intval = chip->die_temp;
 		}
+
+		if (chip->die_temp != -ENODATA)
+			val->intval = chip->die_temp;
+		else
+			rc = -ENODATA;
 		break;
 	case POWER_SUPPLY_PROP_CP_IRQ_STATUS:
 		val->intval = chip->div2_irq_status;
@@ -961,10 +904,8 @@ static int div2_cp_master_get_prop(struct power_supply *psy,
 		} else {
 			rc = smb1398_get_iin_ma(chip, &ilim_ma);
 			if (!rc)
-				val->intval = (ilim_ma * 1000 * 100)
-							/ DIV2_ILIM_CFG_PCT;
+				val->intval = ilim_ma * 1000;
 		}
-		chip->cp_ilim = val->intval;
 		break;
 	case POWER_SUPPLY_PROP_CHIP_VERSION:
 		val->intval = chip->pmic_rev_id->rev4;
@@ -1255,9 +1196,6 @@ static int smb1398_div2_cp_slave_disable_vote_cb(struct votable *votable,
 	if (disable && (chip->div2_cp_ilim_votable)) {
 		ilim_ua = get_effective_result_locked(
 				chip->div2_cp_ilim_votable);
-
-		ilim_ua = (ilim_ua * DIV2_ILIM_CFG_PCT) / 100;
-
 		if (ilim_ua > DIV2_MAX_ILIM_UA)
 			ilim_ua = DIV2_MAX_ILIM_UA;
 
@@ -1287,8 +1225,6 @@ static int smb1398_div2_cp_ilim_vote_cb(struct votable *votable,
 
 	if (!client)
 		return -EINVAL;
-
-	ilim_ua = (ilim_ua * DIV2_ILIM_CFG_PCT) / 100;
 
 	max_ilim_ua = is_cps_available(chip) ?
 		DIV2_MAX_ILIM_DUAL_CP_UA : DIV2_MAX_ILIM_UA;
@@ -1498,13 +1434,6 @@ static int smb1398_request_interrupt(struct smb1398_chip *chip,
 	}
 
 	if (!smb_irqs[irq_index].handler)
-		return 0;
-
-	/*
-	 * Do not register temp-shdwn interrupt as it may misfire on toggling
-	 * the SMB_EN input.
-	 */
-	if (irq_index == TEMP_SHDWN_IRQ)
 		return 0;
 
 	rc = devm_request_threaded_irq(chip->dev, irq, NULL,

@@ -240,8 +240,7 @@ int elevator_init(struct request_queue *q, char *name)
 			if (!e)
 				return 0;
 		} else
-
-			e = elevator_get(q, CONFIG_DEFAULT_IOSCHED, false);
+			e = elevator_get(q, "cfq", false);
 
 		if (!e) {
 			printk(KERN_ERR
@@ -927,8 +926,7 @@ int elv_register(struct elevator_type *e)
 	/* print pretty message */
 	if (!strcmp(e->elevator_name, chosen_elevator) ||
 			(!*chosen_elevator &&
-
-			 !strcmp(e->elevator_name, CONFIG_DEFAULT_IOSCHED)))
+			 !strcmp(e->elevator_name, "cfq")))
 				def = " (default)";
 
 	printk(KERN_INFO "io scheduler %s registered%s\n", e->elevator_name,

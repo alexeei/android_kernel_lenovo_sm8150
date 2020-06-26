@@ -40,14 +40,11 @@ struct srcu_data {
 	unsigned long srcu_unlock_count[2];	/* Unlocks per CPU. */
 
 	/* Update-side state. */
-
 	spinlock_t __private lock ____cacheline_internodealigned_in_smp;
-
 	struct rcu_segcblist srcu_cblist;	/* List of callbacks.*/
 	unsigned long srcu_gp_seq_needed;	/* Furthest future GP needed. */
 	unsigned long srcu_gp_seq_needed_exp;	/* Furthest future exp GP. */
 	bool srcu_cblist_invoking;		/* Invoking these CBs? */
-
 	struct timer_list delay_work;		/* Delay for CB invoking */
 	struct work_struct work;		/* Context for CB invoking. */
 	struct rcu_head srcu_barrier_head;	/* For srcu_barrier() use. */
@@ -55,18 +52,14 @@ struct srcu_data {
 	unsigned long grpmask;			/* Mask for leaf srcu_node */
 						/*  ->srcu_data_have_cbs[]. */
 	int cpu;
-
 	struct srcu_struct *ssp;
-
 };
 
 /*
  * Node in SRCU combining tree, similar in function to rcu_data.
  */
 struct srcu_node {
-
 	spinlock_t __private lock;
-
 	unsigned long srcu_have_cbs[4];		/* GP seq for children */
 						/*  having CBs, but only */
 						/*  is > ->srcu_gq_seq. */
@@ -86,9 +79,7 @@ struct srcu_struct {
 	struct srcu_node *level[RCU_NUM_LVLS + 1];
 						/* First node at each level. */
 	struct mutex srcu_cb_mutex;		/* Serialize CB preparation. */
-
 	spinlock_t __private lock;		/* Protect counters */
-
 	struct mutex srcu_gp_mutex;		/* Serialize GP work. */
 	unsigned int srcu_idx;			/* Current rdr array element. */
 	unsigned long srcu_gp_seq;		/* Grace-period seq #. */
@@ -114,7 +105,6 @@ struct srcu_struct {
 #define SRCU_STATE_SCAN1	1
 #define SRCU_STATE_SCAN2	2
 
-
 #define __SRCU_STRUCT_INIT(name, pcpu_name)				\
 {									\
 	.sda = &pcpu_name,						\
@@ -123,7 +113,6 @@ struct srcu_struct {
 	.work = __DELAYED_WORK_INITIALIZER(name.work, NULL, 0),		\
 	__SRCU_DEP_MAP_INIT(name)					\
 }
-
 
 /*
  * Define and initialize a srcu struct at build time.
@@ -144,7 +133,6 @@ struct srcu_struct {
  *
  * See include/linux/percpu-defs.h for the rules on per-CPU variables.
  */
-
 #ifdef MODULE
 # define __DEFINE_SRCU(name, is_static)					\
 	is_static struct srcu_struct name;				\

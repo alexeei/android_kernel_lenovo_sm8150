@@ -58,16 +58,7 @@ $(warning Detected assembler with broken .inst; disassembly will be unreliable)
   endif
 endif
 
-
-ifeq ($(cc-name),clang)
-# This is a workaround for https://bugs.llvm.org/show_bug.cgi?id=30792.
-# TODO: revert when this is fixed in LLVM.
-KBUILD_CFLAGS	+= -mno-implicit-float
-else
-KBUILD_CFLAGS	+= -mgeneral-regs-only
-endif
-KBUILD_CFLAGS	+= $(lseinstr) $(brokengasinst)
-
+KBUILD_CFLAGS	+= -mgeneral-regs-only $(lseinstr) $(brokengasinst)
 KBUILD_CFLAGS	+= -fno-asynchronous-unwind-tables
 KBUILD_CFLAGS	+= $(call cc-option, -mpc-relative-literal-loads)
 KBUILD_CFLAGS	+= -fno-pic
@@ -76,13 +67,11 @@ KBUILD_AFLAGS	+= $(lseinstr) $(brokengasinst)
 KBUILD_CFLAGS	+= $(call cc-option,-mabi=lp64)
 KBUILD_AFLAGS	+= $(call cc-option,-mabi=lp64)
 
-
 ifeq ($(cc-name),clang)
 KBUILD_CFLAGS	+= -DCONFIG_ARCH_SUPPORTS_INT128
 else
 KBUILD_CFLAGS	+= $(call cc-ifversion, -ge, 0500, -DCONFIG_ARCH_SUPPORTS_INT128)
 endif
-
 
 ifeq ($(CONFIG_CPU_BIG_ENDIAN), y)
 KBUILD_CPPFLAGS	+= -mbig-endian
@@ -92,10 +81,7 @@ LD		+= -EB
 ifeq ($(ld-name),gold)
 LDFLAGS		+= -maarch64_elf64_be_vec
 else
-
-
-LDFLAGS		+= -maarch64linuxb
-
+LDFLAGS		+= -maarch64elfb
 endif
 UTS_MACHINE	:= aarch64_be
 else
@@ -106,10 +92,7 @@ LD		+= -EL
 ifeq ($(ld-name),gold)
 LDFLAGS		+= -maarch64_elf64_le_vec
 else
-
-
-LDFLAGS		+= -maarch64linux
-
+LDFLAGS		+= -maarch64elf
 endif
 UTS_MACHINE	:= aarch64
 endif

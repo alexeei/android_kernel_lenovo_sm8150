@@ -69,6 +69,8 @@ enum print_reason {
 #define PL_FCC_LOW_VOTER		"PL_FCC_LOW_VOTER"
 #define WBC_VOTER			"WBC_VOTER"
 
+#define FB_SCREEN_VOTER			"FB_SCREEN_VOTER"
+
 #define VCONN_MAX_ATTEMPTS	3
 #define OTG_MAX_ATTEMPTS	3
 #define BOOST_BACK_STORM_COUNT	3
@@ -264,9 +266,11 @@ struct smb_charger {
 
 	/* notifiers */
 	struct notifier_block	nb;
+	struct notifier_block	fb_state_notifier;
 
 	/* parallel charging */
 	struct parallel_params	pl;
+	struct delayed_work	fb_state_work;
 
 	/* regulators */
 	struct smb_regulator	*vbus_vreg;
@@ -316,7 +320,9 @@ struct smb_charger {
 	int			boost_threshold_ua;
 	int			system_temp_level;
 	int			thermal_levels;
-	int			*thermal_mitigation;
+	int			*thermal_mitigation_dcp;
+	int			*thermal_mitigation_qc3;
+	int			*thermal_mitigation_qc2;
 	int			dcp_icl_ua;
 	int			fake_capacity;
 	int			fake_batt_status;
@@ -344,6 +350,7 @@ struct smb_charger {
 	u8			float_cfg;
 	bool			use_extcon;
 	bool			otg_present;
+	bool			screen_on;
 
 	/* workaround flag */
 	u32			wa_flags;

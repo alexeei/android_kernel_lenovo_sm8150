@@ -1,8 +1,4 @@
-<<<<<<< HEAD
 /* Copyright (c) 2014-2018, The Linux Foundation. All rights reserved.
-=======
-/* Copyright (c) 2014-2018, 2020 The Linux Foundation. All rights reserved.
->>>>>>> origin1/kernel.lnx.4.14.r4-rel
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -593,16 +589,8 @@ static int parse_cpu_levels(struct device_node *node, struct lpm_cluster *c)
 	if (ret)
 		goto failed;
 
-<<<<<<< HEAD
 	key = "qcom,disable-prediction";
 	cpu->lpm_prediction = !(of_property_read_bool(node, key));
-=======
-	cpu->ipi_prediction = !(of_property_read_bool(node,
-					"qcom,disable-ipi-prediction"));
-
-	cpu->lpm_prediction = !(of_property_read_bool(node,
-					"qcom,disable-prediction"));
->>>>>>> origin1/kernel.lnx.4.14.r4-rel
 
 	if (cpu->lpm_prediction) {
 		key = "qcom,ref-stddev";

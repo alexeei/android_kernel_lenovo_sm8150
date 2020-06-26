@@ -99,12 +99,12 @@ struct static_key sched_feat_keys[__SCHED_FEAT_NR] = {
 
 static void sched_feat_disable(int i)
 {
-	static_key_disable(&sched_feat_keys[i]);
+	static_key_disable_cpuslocked(&sched_feat_keys[i]);
 }
 
 static void sched_feat_enable(int i)
 {
-	static_key_enable(&sched_feat_keys[i]);
+	static_key_enable_cpuslocked(&sched_feat_keys[i]);
 }
 #else
 static void sched_feat_disable(int i) { };
@@ -121,20 +121,19 @@ static int sched_feat_set(char *cmp)
 		cmp += 3;
 	}
 
-	for (i = 0; i < __SCHED_FEAT_NR; i++) {
-		if (strcmp(cmp, sched_feat_names[i]) == 0) {
-			if (neg) {
-				sysctl_sched_features &= ~(1UL << i);
-				sched_feat_disable(i);
-			} else {
-				sysctl_sched_features |= (1UL << i);
-				sched_feat_enable(i);
-			}
-			break;
-		}
+	i = match_string(sched_feat_names, __SCHED_FEAT_NR, cmp);
+	if (i < 0)
+		return i;
+
+	if (neg) {
+		sysctl_sched_features &= ~(1UL << i);
+		sched_feat_disable(i);
+	} else {
+		sysctl_sched_features |= (1UL << i);
+		sched_feat_enable(i);
 	}
 
-	return i;
+	return 0;
 }
 
 static ssize_t
@@ -143,7 +142,7 @@ sched_feat_write(struct file *filp, const char __user *ubuf,
 {
 	char buf[64];
 	char *cmp;
-	int i;
+	int ret;
 	struct inode *inode;
 
 	if (cnt > 63)
@@ -157,11 +156,13 @@ sched_feat_write(struct file *filp, const char __user *ubuf,
 
 	/* Ensure the static_key remains in a consistent state */
 	inode = file_inode(filp);
+	cpus_read_lock();
 	inode_lock(inode);
-	i = sched_feat_set(cmp);
+	ret = sched_feat_set(cmp);
 	inode_unlock(inode);
-	if (i == __SCHED_FEAT_NR)
-		return -EINVAL;
+	cpus_read_unlock();
+	if (ret < 0)
+		return ret;
 
 	*ppos += cnt;
 

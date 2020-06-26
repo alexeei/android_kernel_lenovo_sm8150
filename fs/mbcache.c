@@ -26,9 +26,7 @@
 
 struct mb_cache {
 	/* Hash table of entries */
-
 	struct mb_bucket	*c_bucket;
-
 	/* log2 of hash table size */
 	int			c_bucket_bits;
 	/* Maximum entries in cache to avoid degrading hash too much */
@@ -63,9 +61,7 @@ static unsigned long mb_cache_shrink(struct mb_cache *cache,
 static inline struct hlist_bl_head *mb_cache_entry_head(struct mb_cache *cache,
 							u32 key)
 {
-
 	return &cache->c_bucket[hash_32(key, cache->c_bucket_bits)].hash;
-
 }
 
 /*
@@ -97,7 +93,6 @@ int mb_cache_entry_create(struct mb_cache *cache, gfp_t mask, u32 key,
 		.e_value = value
 	};
 	struct mb_bucket *bucket;
-
 
 	/* Schedule background reclaim if there are too many entries */
 	if (cache->c_entry_count >= cache->c_max_entries)
@@ -390,7 +385,6 @@ struct mb_cache *mb_cache_create(int bucket_bits)
 	cache->c_max_entries = bucket_count << 4;
 	INIT_LIST_HEAD(&cache->c_list);
 	spin_lock_init(&cache->c_list_lock);
-
 	cache->c_bucket = kmalloc(bucket_count * sizeof(*cache->c_bucket),
 				  GFP_KERNEL);
 	if (!cache->c_bucket) {
@@ -447,7 +441,6 @@ void mb_cache_destroy(struct mb_cache *cache)
 		WARN_ON(atomic_read(&entry->e_refcnt) != 1);
 		mb_cache_entry_put(cache, entry);
 	}
-
 	kfree(cache->c_bucket);
 	kfree(cache);
 }

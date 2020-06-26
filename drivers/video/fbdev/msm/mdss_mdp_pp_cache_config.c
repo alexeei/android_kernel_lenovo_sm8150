@@ -665,6 +665,7 @@ static int pp_pcc_cache_params_v1_7(struct mdp_pcc_cfg_data *config,
 		pr_err("read op is not supported\n");
 		return -EINVAL;
 	}
+	else
 	{
 		disp_num = config->block - MDP_LOGICAL_BLOCK_DISP_0;
 		mdss_pp_res->pcc_disp_cfg[disp_num] = *config;
@@ -673,9 +674,14 @@ static int pp_pcc_cache_params_v1_7(struct mdp_pcc_cfg_data *config,
 			(void *) v17_cache_data;
 		if (copy_from_user(&v17_usr_config, config->cfg_payload,
 				   sizeof(v17_usr_config))) {
+		#if defined(CONFIG_FB_MSM_MDSS_KCAL_CTRL) || defined(CONFIG_FLICKER_FREE)
+		memcpy(&v17_usr_config, config->cfg_payload, sizeof(v17_usr_config));
+			ret = 0;
+		#else
 			pr_err("failed to copy v17 pcc\n");
 			ret = -EFAULT;
 			goto pcc_config_exit;
+		#endif
 		}
 		if ((config->ops & MDP_PP_OPS_DISABLE)) {
 			pr_debug("disable pcc\n");

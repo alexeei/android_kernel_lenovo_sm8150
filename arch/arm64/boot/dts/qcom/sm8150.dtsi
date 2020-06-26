@@ -1,4 +1,4 @@
-/* Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -572,7 +572,7 @@
 	};
 
 	chosen {
-		bootargs = "quiet noirqdebug rcupdate.rcu_expedited=1 rcu_nocbs=0-7 cgroup.memory=nokmem,nosocket";
+		bootargs = "quiet noirqdebug rcu_nocbs=0-7 cgroup.memory=nokmem,nosocket";
 	};
 
 	soc: soc { };
@@ -785,7 +785,7 @@
 			alloc-ranges = <0x0 0x00000000 0x0 0xffffffff>;
 			reusable;
 			alignment = <0x0 0x400000>;
-			size = <0x0 0x2800000>;
+			size = <0x0 0x10000000>;
 			linux,cma-default;
 		};
 	};
@@ -1363,6 +1363,7 @@
 		reg = <0xc264000 0x4>,
 		      <0x1fd3000 0x4>;
 		reg-names = "pshold-base", "tcsr-boot-misc-detect";
+		qcom,force-warm-reboot;
 	};
 
 	qcom,msm-rtb {
@@ -4092,7 +4093,6 @@
 
 &gpu_cx_gdsc {
 	parent-supply = <&VDD_CX_LEVEL>;
-	vdd_parent-supply = <&VDD_CX_LEVEL>;
 	status = "ok";
 };
 

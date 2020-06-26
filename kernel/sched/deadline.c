@@ -1116,7 +1116,7 @@ static void update_curr_dl(struct rq *rq)
 {
 	struct task_struct *curr = rq->curr;
 	struct sched_dl_entity *dl_se = &curr->dl;
-	u64 delta_exec;
+	u64 delta_exec, now;
 
 	if (!dl_task(curr) || !on_dl_rq(dl_se))
 		return;
@@ -1129,7 +1129,8 @@ static void update_curr_dl(struct rq *rq)
 	 * natural solution, but the full ramifications of this
 	 * approach need further study.
 	 */
-	delta_exec = rq_clock_task(rq) - curr->se.exec_start;
+	now = rq_clock_task(rq);
+	delta_exec = now - curr->se.exec_start;
 	if (unlikely((s64)delta_exec <= 0)) {
 		if (unlikely(dl_se->dl_yielded))
 			goto throttle;
@@ -1145,7 +1146,7 @@ static void update_curr_dl(struct rq *rq)
 	curr->se.sum_exec_runtime += delta_exec;
 	account_group_exec_runtime(curr, delta_exec);
 
-	curr->se.exec_start = rq_clock_task(rq);
+	curr->se.exec_start = now;
 	cpuacct_charge(curr, delta_exec);
 
 	sched_rt_avg_update(rq, delta_exec);
@@ -1202,6 +1203,9 @@ static enum hrtimer_restart inactive_task_timer(struct hrtimer *timer)
 
 	rq = task_rq_lock(p, &rf);
 
+	sched_clock_tick();
+	update_rq_clock(rq);
+
 	if (!dl_task(p) || p->state == TASK_DEAD) {
 		struct dl_bw *dl_b = dl_bw_of(task_cpu(p));
 
@@ -1220,9 +1224,6 @@ static enum hrtimer_restart inactive_task_timer(struct hrtimer *timer)
 	}
 	if (dl_se->dl_non_contending == 0)
 		goto unlock;
-
-	sched_clock_tick();
-	update_rq_clock(rq);
 
 	sub_running_bw(dl_se->dl_bw, &rq->dl);
 	dl_se->dl_non_contending = 0;

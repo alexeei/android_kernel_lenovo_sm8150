@@ -28,6 +28,8 @@
 #include "storm-watch.h"
 #include "schgm-flash.h"
 
+#include <linux/wakelock.h>
+
 #define smblib_err(chg, fmt, ...)		\
 	pr_err("%s: %s: " fmt, chg->name,	\
 		__func__, ##__VA_ARGS__)	\
@@ -46,6 +48,21 @@
 	((typec_mode == POWER_SUPPLY_TYPEC_SOURCE_MEDIUM	\
 	|| typec_mode == POWER_SUPPLY_TYPEC_SOURCE_HIGH)	\
 	&& (!chg->typec_legacy || chg->typec_legacy_use_rp_icl))
+
+
+struct wake_lock lenovo_chg_lock;
+void lenovo_smblib_stay_awake(void)
+{
+	pr_info("set smblib_stay_awake\n");
+	wake_lock(&lenovo_chg_lock);
+}
+
+void lenovo_smblib_relax(void)
+{
+	pr_info("set smblib_relax\n");
+	wake_unlock(&lenovo_chg_lock);
+}
+
 
 static void update_sw_icl_max(struct smb_charger *chg, int pst);
 static int smblib_get_prop_typec_mode(struct smb_charger *chg);
@@ -889,52 +906,18 @@ static bool is_cp_available(struct smb_charger *chg)
 	return !!chg->cp_psy;
 }
 
-static bool is_cp_topo_vbatt(struct smb_charger *chg)
-{
-	int rc;
-	bool is_vbatt;
-	union power_supply_propval pval;
-
-	if (!is_cp_available(chg))
-		return false;
-
-	rc = power_supply_get_property(chg->cp_psy,
-				POWER_SUPPLY_PROP_PARALLEL_OUTPUT_MODE, &pval);
-	if (rc < 0)
-		return false;
-
-	is_vbatt = (pval.intval == POWER_SUPPLY_PL_OUTPUT_VBAT);
-
-	smblib_dbg(chg, PR_WLS, "%s\n", is_vbatt ? "true" : "false");
-
-	return is_vbatt;
-}
-
 #define CP_TO_MAIN_ICL_OFFSET_PC		10
 int smblib_get_qc3_main_icl_offset(struct smb_charger *chg, int *offset_ua)
 {
 	union power_supply_propval pval = {0, };
 	int rc;
 
-	/*
-	 * Apply ILIM offset to main charger's FCC if all of the following
-	 * conditions are met:
-	 * - HVDCP3 adapter with CP as parallel charger
-	 * - Output connection topology is VBAT
-	 */
-	if (!is_cp_topo_vbatt(chg) || chg->hvdcp3_standalone_config
-		|| (chg->real_charger_type != POWER_SUPPLY_TYPE_USB_HVDCP_3))
-		return -EINVAL;
-
-	rc = power_supply_get_property(chg->cp_psy, POWER_SUPPLY_PROP_CP_ENABLE,
-					&pval);
-	if (rc < 0) {
-		smblib_err(chg, "Couldn't get CP ENABLE rc=%d\n", rc);
-		return rc;
+	if (((chg->real_charger_type != POWER_SUPPLY_TYPE_USB_HVDCP_3)
+		&& (chg->real_charger_type != POWER_SUPPLY_TYPE_USB_HVDCP_3P5))
+		|| chg->hvdcp3_standalone_config || !is_cp_available(chg)) {
+		*offset_ua = 0;
+		return 0;
 	}
-
-	if (!pval.intval)
-		return -EINVAL;
 
 	rc = power_supply_get_property(chg->cp_psy, POWER_SUPPLY_PROP_CP_ILIM,
 					&pval);
@@ -1652,7 +1635,7 @@ static int smblib_awake_vote_callback(struct votable *votable, void *data,
 	struct smb_charger *chg = data;
 
 	if (awake)
-		pm_stay_awake(chg->dev);
+		pm_wakeup_event(chg->dev, 500);
 	else
 		pm_relax(chg->dev);
 
@@ -1940,6 +1923,39 @@ static bool is_charging_paused(struct smb_charger *chg)
 
 	return val & CHARGING_PAUSE_CMD_BIT;
 }
+
+#ifdef SUPPORT_BATTERY_AGE
+int smblib_get_prop_batt_age(struct smb_charger *chg,
+			     union power_supply_propval *val)
+{
+	int age;
+	int rc = -EINVAL;
+	union power_supply_propval pval = {0, };
+
+	if (chg->bms_psy) {
+		rc = power_supply_get_property(chg->bms_psy,
+				POWER_SUPPLY_PROP_CHARGE_FULL, &pval);
+		if (rc < 0) {
+			smblib_err(chg, "Fail: get charge full rc=%d\n",
+				   rc);
+			return rc;
+		}
+
+		age = pval.intval * 100;
+
+		rc = power_supply_get_property(chg->bms_psy,
+				POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN, &pval);
+		if (rc < 0) {
+			smblib_err(chg, "Fail: get chrg full design rc=%d\n",
+				   rc);
+			return rc;
+		}
+
+		val->intval = age / pval.intval;
+	}
+	return rc;
+}
+#endif
 
 int smblib_get_prop_batt_status(struct smb_charger *chg,
 				union power_supply_propval *val)
@@ -3786,6 +3802,7 @@ int smblib_get_pe_start(struct smb_charger *chg,
 int smblib_get_prop_smb_health(struct smb_charger *chg)
 {
 	int rc;
+	u8 stat;
 	int input_present;
 	union power_supply_propval prop = {0, };
 
@@ -3793,21 +3810,50 @@ int smblib_get_prop_smb_health(struct smb_charger *chg)
 	if (rc < 0)
 		return rc;
 
-	if ((input_present == INPUT_NOT_PRESENT) || (!is_cp_available(chg)))
+	if (input_present == INPUT_NOT_PRESENT)
 		return POWER_SUPPLY_HEALTH_UNKNOWN;
 
-	rc = power_supply_get_property(chg->cp_psy,
-				POWER_SUPPLY_PROP_CP_DIE_TEMP, &prop);
-	if (rc < 0)
-		return rc;
+	/*
+	 * SMB health is used only for CP, report UNKNOWN if
+	 * switcher is not enabled.
+	 */
+	if (is_cp_available(chg)) {
+		rc = power_supply_get_property(chg->cp_psy,
+			POWER_SUPPLY_PROP_CP_SWITCHER_EN, &prop);
+		if (!rc && !prop.intval)
+			return POWER_SUPPLY_HEALTH_UNKNOWN;
+	}
 
-	if (prop.intval > SMB_TEMP_RST_THRESH)
+	if (chg->wa_flags & SW_THERM_REGULATION_WA) {
+		if (chg->smb_temp == -ENODATA)
+			return POWER_SUPPLY_HEALTH_UNKNOWN;
+
+		if (chg->smb_temp > SMB_TEMP_RST_THRESH)
+			return POWER_SUPPLY_HEALTH_OVERHEAT;
+
+		if (chg->smb_temp > SMB_TEMP_REG_H_THRESH)
+			return POWER_SUPPLY_HEALTH_HOT;
+
+		if (chg->smb_temp > SMB_TEMP_REG_L_THRESH)
+			return POWER_SUPPLY_HEALTH_WARM;
+
+		return POWER_SUPPLY_HEALTH_COOL;
+	}
+
+	rc = smblib_read(chg, SMB_TEMP_STATUS_REG, &stat);
+	if (rc < 0) {
+		smblib_err(chg, "Couldn't read SMB_TEMP_STATUS_REG, rc=%d\n",
+				rc);
+		return POWER_SUPPLY_HEALTH_UNKNOWN;
+	}
+
+	if (stat & SMB_TEMP_RST_BIT)
 		return POWER_SUPPLY_HEALTH_OVERHEAT;
 
-	if (prop.intval > SMB_TEMP_REG_H_THRESH)
+	if (stat & SMB_TEMP_UB_BIT)
 		return POWER_SUPPLY_HEALTH_HOT;
 
-	if (prop.intval > SMB_TEMP_REG_L_THRESH)
+	if (stat & SMB_TEMP_LB_BIT)
 		return POWER_SUPPLY_HEALTH_WARM;
 
 	return POWER_SUPPLY_HEALTH_COOL;
@@ -4038,12 +4084,19 @@ static int smblib_handle_usb_current(struct smb_charger *chg,
 		} else {
 			/*
 			 * FLOAT charger detected as SDP by USB driver,
-			 * charge with the requested current and update the
-			 * real_charger_type
+			 * charge with the requested current 500mA
+			 * but don't update the real_charger_type
+			 * use real_charger_type
 			 */
+#ifdef SUPPORT_FLOAT_CHRGER_FOR_LENOVO
+			rc = vote(chg->usb_icl_votable, USB_PSY_VOTER,
+                                                true, FLOAT_CURRENT_UA);
+			pr_info("power_supply real type is USB_FLOAT\n");
+#else
 			chg->real_charger_type = POWER_SUPPLY_TYPE_USB;
 			rc = vote(chg->usb_icl_votable, USB_PSY_VOTER,
 						true, usb_current);
+#endif
 			if (rc < 0)
 				return rc;
 			rc = vote(chg->usb_icl_votable, SW_ICL_MAX_VOTER,
@@ -4078,6 +4131,7 @@ static int smblib_handle_usb_current(struct smb_charger *chg,
 	return 0;
 }
 
+#define USB_ENUMERATE_MAX_CURR_THR_UA 100000
 int smblib_set_prop_sdp_current_max(struct smb_charger *chg,
 				    const union power_supply_propval *val)
 {
@@ -4093,7 +4147,7 @@ int smblib_set_prop_sdp_current_max(struct smb_charger *chg,
 		}
 
 		/* handle the request only when USB is present */
-		if (pval.intval)
+		if (pval.intval && (val->intval >= USB_ENUMERATE_MAX_CURR_THR_UA))
 			rc = smblib_handle_usb_current(chg, val->intval);
 	} else if (chg->system_suspend_supported) {
 		if (val->intval <= USBIN_25MA)
@@ -4811,7 +4865,6 @@ static void smblib_eval_chg_termination(struct smb_charger *chg, u8 batt_status)
 	if ((batt_status == TERMINATE_CHARGE) && (pval.intval == 100)) {
 		chg->cc_soc_ref = 0;
 		chg->last_cc_soc = 0;
-		chg->term_vbat_uv = 0;
 		alarm_start_relative(&chg->chg_termination_alarm,
 				ms_to_ktime(CHG_TERM_WA_ENTRY_DELAY_MS));
 	} else if (pval.intval < 100) {
@@ -4821,7 +4874,6 @@ static void smblib_eval_chg_termination(struct smb_charger *chg, u8 batt_status)
 		 */
 		chg->cc_soc_ref = 0;
 		chg->last_cc_soc = 0;
-		chg->term_vbat_uv = 0;
 	}
 }
 
@@ -5222,6 +5274,18 @@ void smblib_usb_plugin_locked(struct smb_charger *chg)
 		smblib_update_usb_type(chg);
 	}
 
+	if (vbus_rising)	//plug in USB or Adaptor
+	{
+		lenovo_smblib_stay_awake();
+		pr_info("plug in USB\n");
+	}
+	else		//plug out USB or Adaptor
+	{
+		lenovo_smblib_relax();
+		pr_info("plug out USB\n");
+	}
+
+
 	if (chg->connector_type == POWER_SUPPLY_CONNECTOR_MICRO_USB)
 		smblib_micro_usb_plugin(chg, vbus_rising);
 
@@ -5231,8 +5295,13 @@ void smblib_usb_plugin_locked(struct smb_charger *chg)
 	power_supply_changed(chg->usb_psy);
 	if (chg->dual_role)
 		dual_role_instance_changed(chg->dual_role);
+#ifndef CTRL_SMB_LOG_FOR_LENOVO
 	smblib_dbg(chg, PR_INTERRUPT, "IRQ: usbin-plugin %s\n",
 					vbus_rising ? "attached" : "detached");
+#else
+	pr_info("smblib_usb_plugin_locked IRQ: usbin-plugin %s\n",
+					vbus_rising ? "attached" : "detached");
+#endif
 }
 
 irqreturn_t usb_plugin_irq_handler(int irq, void *data)
@@ -5240,10 +5309,21 @@ irqreturn_t usb_plugin_irq_handler(int irq, void *data)
 	struct smb_irq_data *irq_data = data;
 	struct smb_charger *chg = irq_data->parent_data;
 
+#ifndef CTRL_SMB_LOG_FOR_LENOVO
 	if (chg->pd_hard_reset)
 		smblib_usb_plugin_hard_reset_locked(chg);
 	else
 		smblib_usb_plugin_locked(chg);
+#else
+	if (chg->pd_hard_reset){
+		smblib_usb_plugin_hard_reset_locked(chg);
+		pr_info("usb_plugin_irq_handler:pd_hard_reset is TRUE\n");
+	}
+        else{
+		smblib_usb_plugin_locked(chg);
+		pr_info("usb_plugin_irq_handler:triger\n");
+	}
+#endif
 
 	return IRQ_HANDLED;
 }
@@ -5251,15 +5331,27 @@ irqreturn_t usb_plugin_irq_handler(int irq, void *data)
 static void smblib_handle_slow_plugin_timeout(struct smb_charger *chg,
 					      bool rising)
 {
+#ifndef CTRL_SMB_LOG_FOR_LENOVO
 	smblib_dbg(chg, PR_INTERRUPT, "IRQ: slow-plugin-timeout %s\n",
 		   rising ? "rising" : "falling");
+#else
+	pr_info("smblib_handle_slow_plugin_timeout:IRQ: slow-plugin-timeout %s\n",
+		   rising ? "rising" : "falling");
+#endif
 }
 
 static void smblib_handle_sdp_enumeration_done(struct smb_charger *chg,
 					       bool rising)
 {
+#ifndef CTRL_SMB_LOG_FOR_LENOVO
 	smblib_dbg(chg, PR_INTERRUPT, "IRQ: sdp-enumeration-done %s\n",
 		   rising ? "rising" : "falling");
+#else
+	pr_info("smblib_handle_sdp_enumeration_done:IRQ: sdp-enumeration-done %s\n",
+		   rising ? "rising" : "falling");
+
+#endif
+
 }
 
 #define APSD_EXTENDED_TIMEOUT_MS	400
@@ -5336,8 +5428,13 @@ static void smblib_handle_hvdcp_check_timeout(struct smb_charger *chg,
 static void smblib_handle_hvdcp_detect_done(struct smb_charger *chg,
 					    bool rising)
 {
+#ifndef CTRL_SMB_LOG_FOR_LENOVO
 	smblib_dbg(chg, PR_INTERRUPT, "IRQ: hvdcp-detect-done %s\n",
 		   rising ? "rising" : "falling");
+#else
+	pr_info("smblib_handle_hvdcp_detect_done:IRQ: hvdcp-detect-done %s\n",
+		   rising ? "rising" : "falling");
+#endif
 }
 
 static void update_sw_icl_max(struct smb_charger *chg, int pst)
@@ -5417,6 +5514,8 @@ static void smblib_handle_apsd_done(struct smb_charger *chg, bool rising)
 		return;
 
 	apsd_result = smblib_update_usb_type(chg);
+
+	pr_info("APSD = %s,real charge type is %d\n",apsd_result->name,chg->real_charger_type);
 
 	update_sw_icl_max(chg, apsd_result->pst);
 
@@ -5947,26 +6046,6 @@ static void smblib_lpd_clear_ra_open_work(struct smb_charger *chg)
 	vote(chg->awake_votable, LPD_VOTER, false, 0);
 }
 
-static int smblib_role_switch_failure(struct smb_charger *chg)
-{
-	int rc = 0;
-	union power_supply_propval pval = {0, };
-
-	if (!chg->use_extcon)
-		return 0;
-
-	rc = smblib_get_prop_usb_present(chg, &pval);
-	if (rc < 0) {
-		pr_err("Couldn't get usb presence status rc=%d\n", rc);
-		return rc;
-	}
-
-	if (pval.intval)
-		smblib_notify_device_mode(chg, true);
-
-	return rc;
-}
-
 irqreturn_t typec_attach_detach_irq_handler(int irq, void *data)
 {
 	struct smb_irq_data *irq_data = data;
@@ -6010,13 +6089,6 @@ irqreturn_t typec_attach_detach_irq_handler(int irq, void *data)
 			typec_src_insertion(chg);
 		}
 
-		if (chg->typec_role_swap_failed) {
-			rc = smblib_role_switch_failure(chg);
-			if (rc < 0)
-				pr_err("Failed to role switch rc=%d\n", rc);
-
-			chg->typec_role_swap_failed = false;
-		}
 	} else {
 		switch (chg->sink_src_mode) {
 		case SRC_MODE:
@@ -6043,11 +6115,9 @@ irqreturn_t typec_attach_detach_irq_handler(int irq, void *data)
 			 * swap is not in progress, to ensure forced sink or src
 			 * mode configuration is reset properly.
 			 */
-			if (chg->dual_role) {
+			if (chg->dual_role)
 				smblib_force_dr_mode(chg,
 						DUAL_ROLE_PROP_MODE_NONE);
-				chg->typec_role_swap_failed = false;
-			}
 		}
 
 		if (chg->lpd_stage == LPD_STAGE_FLOAT_CANCEL)
@@ -6867,7 +6937,6 @@ static void smblib_chg_termination_work(struct work_struct *work)
 	struct smb_charger *chg = container_of(work, struct smb_charger,
 						chg_termination_work);
 	int rc, input_present, delay = CHG_TERM_WA_ENTRY_DELAY_MS;
-	int vbat_now_uv, max_fv_uv;
 
 	/*
 	 * Hold awake votable to prevent pm_relax being called prior to
@@ -6887,14 +6956,6 @@ static void smblib_chg_termination_work(struct work_struct *work)
 		goto out;
 	}
 
-	/* Get the battery float voltage */
-	rc = smblib_get_prop_from_bms(chg, POWER_SUPPLY_PROP_VOLTAGE_MAX,
-				&pval);
-	if (rc < 0)
-		goto out;
-
-	max_fv_uv = pval.intval;
-
 	rc = smblib_get_prop_from_bms(chg, POWER_SUPPLY_PROP_CHARGE_FULL,
 					&pval);
 	if (rc < 0)
@@ -6908,20 +6969,6 @@ static void smblib_chg_termination_work(struct work_struct *work)
 	 */
 	if (pval.intval != chg->charge_full_cc || !chg->cc_soc_ref) {
 		chg->charge_full_cc = pval.intval;
-
-		rc = smblib_get_prop_from_bms(chg,
-				POWER_SUPPLY_PROP_VOLTAGE_NOW, &pval);
-		if (rc < 0)
-			goto out;
-
-		/*
-		 * Store the Vbat at the charge termination to compare with
-		 * the current voltage to see if the Vbat is increasing after
-		 * charge termination in BSM.
-		 */
-		chg->term_vbat_uv = pval.intval;
-		vbat_now_uv = pval.intval;
-
 		rc = smblib_get_prop_from_bms(chg, POWER_SUPPLY_PROP_CC_SOC,
 					&pval);
 		if (rc < 0)
@@ -6929,13 +6976,6 @@ static void smblib_chg_termination_work(struct work_struct *work)
 
 		chg->cc_soc_ref = pval.intval;
 	} else {
-		rc = smblib_get_prop_from_bms(chg,
-				POWER_SUPPLY_PROP_VOLTAGE_NOW, &pval);
-		if (rc < 0)
-			goto out;
-
-		vbat_now_uv = pval.intval;
-
 		rc = smblib_get_prop_from_bms(chg, POWER_SUPPLY_PROP_CC_SOC,
 					&pval);
 		if (rc < 0)
@@ -6956,18 +6996,15 @@ static void smblib_chg_termination_work(struct work_struct *work)
 
 	/*
 	 * Suspend/Unsuspend USB input to keep cc_soc within the 0.5% to 0.75%
-	 * overshoot range of the cc_soc value at termination and make sure that
-	 * vbat is indeed rising above vfloat.
+	 * overshoot range of the cc_soc value at termination, to prevent
+	 * overcharging.
 	 */
 	if (pval.intval < DIV_ROUND_CLOSEST(chg->cc_soc_ref * 10050, 10000)) {
 		vote(chg->usb_icl_votable, CHG_TERMINATION_VOTER, false, 0);
 		vote(chg->dc_suspend_votable, CHG_TERMINATION_VOTER, false, 0);
 		delay = CHG_TERM_WA_ENTRY_DELAY_MS;
-	} else if ((pval.intval > DIV_ROUND_CLOSEST(chg->cc_soc_ref * 10075,
-								10000))
-		  && ((vbat_now_uv > chg->term_vbat_uv) &&
-		     (vbat_now_uv > max_fv_uv))) {
-
+	} else if (pval.intval > DIV_ROUND_CLOSEST(chg->cc_soc_ref * 10075,
+								10000)) {
 		if (input_present & INPUT_PRESENT_USB)
 			vote(chg->usb_icl_votable, CHG_TERMINATION_VOTER,
 					true, 0);
@@ -6977,9 +7014,8 @@ static void smblib_chg_termination_work(struct work_struct *work)
 		delay = CHG_TERM_WA_EXIT_DELAY_MS;
 	}
 
-	smblib_dbg(chg, PR_MISC, "Chg Term WA readings: cc_soc: %d, cc_soc_ref: %d, delay: %d vbat_now %d term_vbat %d\n",
-			pval.intval, chg->cc_soc_ref, delay, vbat_now_uv,
-			chg->term_vbat_uv);
+	smblib_dbg(chg, PR_MISC, "Chg Term WA readings: cc_soc: %d, cc_soc_ref: %d, delay: %d\n",
+			pval.intval, chg->cc_soc_ref, delay);
 	alarm_start_relative(&chg->chg_termination_alarm, ms_to_ktime(delay));
 out:
 	vote(chg->awake_votable, CHG_TERMINATION_VOTER, false, 0);
@@ -7011,7 +7047,6 @@ static void apsd_timer_cb(unsigned long data)
 	chg->apsd_ext_timeout = true;
 }
 
-#define SOFT_JEITA_HYSTERESIS_OFFSET	0x200
 static void jeita_update_work(struct work_struct *work)
 {
 	struct smb_charger *chg = container_of(work, struct smb_charger,
@@ -7021,8 +7056,6 @@ static void jeita_update_work(struct work_struct *work)
 	union power_supply_propval val;
 	int rc, tmp[2], max_fcc_ma, max_fv_uv;
 	u32 jeita_hard_thresholds[2];
-	u16 addr;
-	u8 buff[2];
 
 	batt_node = of_find_node_by_name(node, "qcom,battery-data");
 	if (!batt_node) {
@@ -7085,34 +7118,6 @@ static void jeita_update_work(struct work_struct *work)
 					rc);
 			goto out;
 		}
-	} else {
-		/* Populate the jeita-soft-thresholds */
-		addr = CHGR_JEITA_THRESHOLD_BASE_REG(JEITA_SOFT);
-		rc = smblib_batch_read(chg, addr, buff, 2);
-		if (rc < 0) {
-			pr_err("failed to read 0x%4X, rc=%d\n", addr, rc);
-			goto out;
-		}
-
-		chg->jeita_soft_thlds[1] = buff[1] | buff[0] << 8;
-
-		rc = smblib_batch_read(chg, addr + 2, buff, 2);
-		if (rc < 0) {
-			pr_err("failed to read 0x%4X, rc=%d\n", addr + 2, rc);
-			goto out;
-		}
-
-		chg->jeita_soft_thlds[0] = buff[1] | buff[0] << 8;
-
-		/*
-		 * Update the soft jeita hysteresis 2 DegC less for warm and
-		 * 2 DegC more for cool than the soft jeita thresholds to avoid
-		 * overwriting the registers with invalid values.
-		 */
-		chg->jeita_soft_hys_thlds[0] =
-			chg->jeita_soft_thlds[0] - SOFT_JEITA_HYSTERESIS_OFFSET;
-		chg->jeita_soft_hys_thlds[1] =
-			chg->jeita_soft_thlds[1] + SOFT_JEITA_HYSTERESIS_OFFSET;
 	}
 
 	chg->jeita_soft_fcc[0] = chg->jeita_soft_fcc[1] = -EINVAL;
@@ -7318,6 +7323,28 @@ int smblib_force_dr_mode(struct smb_charger *chg, int mode)
 	return rc;
 }
 
+static int smblib_role_switch_failure(struct smb_charger *chg, int mode)
+{
+	int rc = 0;
+	union power_supply_propval pval = {0, };
+
+	if (!chg->use_extcon)
+		return 0;
+
+	rc = smblib_get_prop_usb_present(chg, &pval);
+	if (rc < 0) {
+		pr_err("Couldn't get usb presence status rc=%d\n", rc);
+		return rc;
+	}
+
+	if (pval.intval) {
+		if (mode == DUAL_ROLE_PROP_MODE_DFP)
+			smblib_notify_device_mode(chg, true);
+	}
+
+	return rc;
+}
+
 static void smblib_dual_role_check_work(struct work_struct *work)
 {
 	struct smb_charger *chg = container_of(work, struct smb_charger,
@@ -7344,13 +7371,15 @@ static void smblib_dual_role_check_work(struct work_struct *work)
 				chg->typec_mode == POWER_SUPPLY_TYPEC_NONE) {
 			smblib_dbg(chg, PR_MISC, "Role reversal not latched to DFP in %d msecs. Resetting to DRP mode\n",
 				ROLE_REVERSAL_DELAY_MS);
-			chg->pr_swap_in_progress = false;
-			chg->typec_role_swap_failed = true;
 			rc = smblib_force_dr_mode(chg,
 						DUAL_ROLE_PROP_MODE_NONE);
 			if (rc < 0)
 				pr_err("Failed to set DRP mode, rc=%d\n", rc);
 
+			rc = smblib_role_switch_failure(chg,
+						DUAL_ROLE_PROP_MODE_DFP);
+			if (rc < 0)
+				pr_err("Failed to role switch rc=%d\n", rc);
 		}
 		chg->pr_swap_in_progress = false;
 		break;
@@ -7570,6 +7599,8 @@ int smblib_init(struct smb_charger *chg)
 			return -ENODEV;
 		}
 	}
+
+	wake_lock_init(&lenovo_chg_lock, WAKE_LOCK_SUSPEND, "lenovo_chg_lock");
 
 	if (chg->uusb_moisture_protection_enabled) {
 		INIT_WORK(&chg->moisture_protection_work,

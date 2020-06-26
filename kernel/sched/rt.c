@@ -1029,11 +1029,13 @@ static void update_curr_rt(struct rq *rq)
 	struct task_struct *curr = rq->curr;
 	struct sched_rt_entity *rt_se = &curr->rt;
 	u64 delta_exec;
+	u64 now;
 
 	if (curr->sched_class != &rt_sched_class)
 		return;
 
-	delta_exec = rq_clock_task(rq) - curr->se.exec_start;
+	now = rq_clock_task(rq);
+	delta_exec = now - curr->se.exec_start;
 	if (unlikely((s64)delta_exec <= 0))
 		return;
 
@@ -1046,7 +1048,7 @@ static void update_curr_rt(struct rq *rq)
 	curr->se.sum_exec_runtime += delta_exec;
 	account_group_exec_runtime(curr, delta_exec);
 
-	curr->se.exec_start = rq_clock_task(rq);
+	curr->se.exec_start = now;
 	cpuacct_charge(curr, delta_exec);
 
 	sched_rt_avg_update(rq, delta_exec);
@@ -1759,9 +1761,13 @@ static int rt_energy_aware_wake_cpu(struct task_struct *task)
 	unsigned long tutil = task_util(task);
 	int best_cpu_idle_idx = INT_MAX;
 	int cpu_idle_idx = -1, start_cpu;
+#ifdef CONFIG_SCHED_WALT
 	bool boost_on_big = sched_boost() == FULL_THROTTLE_BOOST ?
 				  (sched_boost_policy() == SCHED_BOOST_ON_BIG) :
 				  false;
+#else
+	bool boost_on_big = false;
+#endif
 
 	rcu_read_lock();
 

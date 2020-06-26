@@ -386,8 +386,6 @@ unsigned int kgsl_pwrctrl_adjust_pwrlevel(struct kgsl_device *device,
 {
 	struct kgsl_pwrctrl *pwr = &device->pwrctrl;
 
-	unsigned int old_level = pwr->active_pwrlevel;
-
 	/* If a pwr constraint is expired, remove it */
 	if ((pwr->constraint.type != KGSL_CONSTRAINT_NONE) &&
 		(time_after(jiffies, pwr->constraint.expires))) {
@@ -2207,7 +2205,6 @@ static void _close_ahbpath_pcl(struct kgsl_pwrctrl *pwr)
 	pwr->ahbpath_pcl = 0;
 }
 
-
 static inline void _close_regulators(struct kgsl_pwrctrl *pwr)
 {
 	int i;
@@ -2282,12 +2279,10 @@ int kgsl_pwrctrl_init(struct kgsl_device *device)
 	struct platform_device *pdev = device->pdev;
 	struct kgsl_pwrctrl *pwr = &device->pwrctrl;
 	struct device_node *ocmem_bus_node;
-
 	struct device_node *ahbpath_node;
 	struct msm_bus_scale_pdata *ocmem_scale_table = NULL;
 	struct msm_bus_scale_pdata *bus_scale_table;
 	struct msm_bus_scale_pdata *ahbpath_table;
-
 	struct device_node *gpubw_dev_node = NULL;
 	struct platform_device *p2dev;
 
@@ -2397,7 +2392,6 @@ int kgsl_pwrctrl_init(struct kgsl_device *device)
 		}
 	}
 
-
 	/* Bus width in bytes, set it to zero if not found */
 	if (of_property_read_u32(pdev->dev.of_node, "qcom,bus-width",
 		&pwr->bus_width))
@@ -2428,8 +2422,6 @@ int kgsl_pwrctrl_init(struct kgsl_device *device)
 		if (pwr->pcl == 0) {
 			result = -EINVAL;
 			goto error_cleanup_ahbpath_pcl;
-
-
 		}
 	}
 
@@ -2535,7 +2527,6 @@ error_cleanup_pcl:
 	_close_pcl(pwr);
 error_cleanup_ahbpath_pcl:
 	_close_ahbpath_pcl(pwr);
-
 error_cleanup_ocmem_pcl:
 	_close_ocmem_pcl(pwr);
 error_disable_pm:
@@ -2799,6 +2790,7 @@ static int _wake(struct kgsl_device *device)
 {
 	struct kgsl_pwrctrl *pwr = &device->pwrctrl;
 	int status = 0;
+	
 
 	switch (device->state) {
 	case KGSL_STATE_SUSPEND:
@@ -2825,6 +2817,7 @@ static int _wake(struct kgsl_device *device)
 		/* Turn on the core clocks */
 		kgsl_pwrctrl_clk(device, KGSL_PWRFLAGS_ON, KGSL_STATE_ACTIVE);
 
+		
 		/*
 		 * No need to turn on/off irq here as it no longer affects
 		 * power collapse
@@ -3033,7 +3026,7 @@ _slumber(struct kgsl_device *device)
 		kgsl_pwrctrl_clk_set_options(device, false);
 		kgsl_pwrctrl_disable(device);
 		kgsl_pwrscale_sleep(device);
-		trace_gpu_frequency(0, 0);
+		
 		kgsl_pwrctrl_set_state(device, KGSL_STATE_SLUMBER);
 		pm_qos_update_request(&device->pwrctrl.pm_qos_req_dma,
 						PM_QOS_DEFAULT_VALUE);
@@ -3049,7 +3042,7 @@ _slumber(struct kgsl_device *device)
 		break;
 	case KGSL_STATE_AWARE:
 		kgsl_pwrctrl_disable(device);
-		trace_gpu_frequency(0, 0);
+		
 		kgsl_pwrctrl_set_state(device, KGSL_STATE_SLUMBER);
 		break;
 	default:

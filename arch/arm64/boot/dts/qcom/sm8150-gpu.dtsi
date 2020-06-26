@@ -83,7 +83,6 @@
 		qcom,gpu-quirk-cx-gdsc;
 
 		qcom,idle-timeout = <64>; //msecs
-		qcom,no-nap;
 		
 
 		qcom,highest-bank-bit = <15>;
@@ -314,7 +313,6 @@
 				<1 598 0 9999999>;      // max freq
 		};
 
-
 	};
 
 	kgsl_msm_iommu: qcom,kgsl-iommu@0x02CA0000 {
@@ -333,8 +331,7 @@
 		qcom,secure_align_mask = <0xfff>;
 		qcom,retention;
 		qcom,hyp_secure_alloc;
-        qcom,unmap_fast;
-
+                qcom,unmap_fast;
 
 		gfx3d_user: gfx3d_user {
 			compatible = "qcom,smmu-kgsl-cb";

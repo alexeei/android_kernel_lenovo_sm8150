@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020, The Linux Foundation.All rights reserved.
+ * Copyright (c) 2015-2019, The Linux Foundation.All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -114,8 +114,7 @@ struct dsi_display_boot_param {
  * struct dsi_display_clk_info - dsi display clock source information
  * @src_clks:          Source clocks for DSI display.
  * @mux_clks:          Mux clocks used for DFPS.
- * @shadow_clks:       Used for D-phy clock switch
- * @shadow_cphy_clks:  Used for C-phy clock switch
+ * @shadow_clks:       Used for DFPS.
  * @xo_clks:           XO clocks for DSI display
  */
 struct dsi_display_clk_info {
@@ -123,7 +122,6 @@ struct dsi_display_clk_info {
 	struct dsi_clk_link_set mux_clks;
 	struct dsi_clk_link_set cphy_clks;
 	struct dsi_clk_link_set shadow_clks;
-	struct dsi_clk_link_set shadow_cphy_clks;
 	struct dsi_clk_link_set xo_clks;
 };
 
@@ -179,7 +177,6 @@ struct dsi_display_ext_bridge {
  * @cmdline_topology: Display topology shared from kernel command line.
  * @cmdline_timing:   Display timing shared from kernel command line.
  * @is_tpg_enabled:   TPG state.
- * @poms_pending;      Flag indicating the pending panel operating mode switch.
  * @ulps_enabled:     ulps state.
  * @clamp_enabled:    clamp state.
  * @phy_idle_power_off:   PHY power state.
@@ -241,7 +238,6 @@ struct dsi_display {
 	int cmdline_topology;
 	int cmdline_timing;
 	bool is_tpg_enabled;
-	bool poms_pending;
 	bool ulps_enabled;
 	bool clamp_enabled;
 	bool phy_idle_power_off;
@@ -374,7 +370,7 @@ int dsi_display_get_mode_count(struct dsi_display *display, u32 *count);
  * dsi_display_get_modes() - get modes supported by display
  * @display:            Handle to display.
  * @modes;              Output param, list of DSI modes. Number of modes matches
- *                      count got from display->panel->num_display_modes;
+ *                      count returned by dsi_display_get_mode_count
  *
  * Return: error code.
  */
@@ -613,10 +609,8 @@ void dsi_display_enable_event(struct drm_connector *connector,
  */
 int dsi_display_set_backlight(struct drm_connector *connector,
 		void *display, u32 bl_lvl);
-
 int dsi_display_set_backlight_hbm(struct drm_connector *connector,
 		void *display, u32 bl_lvl);
-
 /**
  * dsi_display_check_status() - check if panel is dead or alive
  * @connector:          Pointer to drm connector structure
@@ -626,10 +620,8 @@ int dsi_display_set_backlight_hbm(struct drm_connector *connector,
 int dsi_display_check_status(struct drm_connector *connector, void *display,
 				bool te_check_override);
 
-
 int dsi_display_read_elvss_volt(struct drm_connector *connector, void *display,
 				bool te_check_override);
-
 
 /**
  * dsi_display_cmd_transfer() - transfer command to the panel
@@ -719,7 +711,6 @@ int dsi_display_cont_splash_config(void *display);
  */
 int dsi_display_get_panel_vfp(void *display,
 	int h_active, int v_active);
-
 
 #ifdef CONFIG_EXPOSURE_ADJUSTMENT
 struct dsi_display *get_main_display(void);

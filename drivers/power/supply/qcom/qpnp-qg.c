@@ -42,7 +42,7 @@
 #include "qg-battery-profile.h"
 #include "qg-defs.h"
 
-static int qg_debug_mask;
+static int qg_debug_mask = 0;
 module_param_named(
 	debug_mask, qg_debug_mask, int, 0600
 );
@@ -4205,6 +4205,7 @@ static int process_suspend(struct qpnp_qg *chip)
 		return 0;
 
 	cancel_delayed_work_sync(&chip->ttf->ttf_work);
+	cancel_delayed_work_sync(&chip->qg_sleep_exit_work);
 
 	chip->suspend_data = false;
 
@@ -4370,9 +4371,6 @@ static int qpnp_qg_suspend_noirq(struct device *dev)
 {
 	int rc;
 	struct qpnp_qg *chip = dev_get_drvdata(dev);
-
-	/* cancel any pending sleep_exit work */
-	cancel_delayed_work_sync(&chip->qg_sleep_exit_work);
 
 	mutex_lock(&chip->data_lock);
 

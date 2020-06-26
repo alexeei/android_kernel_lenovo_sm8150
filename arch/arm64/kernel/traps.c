@@ -140,24 +140,6 @@ void dump_backtrace(struct pt_regs *regs, struct task_struct *tsk)
 
 	printk("Call trace:\n");
 	do {
-		if (tsk != current && (cur_state != tsk->state
-			/*
-			 * We would not be printing backtrace for the task
-			 * that has changed state from uninterruptible to
-			 * running before hitting the do-while loop but after
-			 * saving the current state. If task is in running
-			 * state before saving the state, then we may print
-			 * wrong call trace or end up in infinite while loop
-			 * if *(fp) and *(fp+8) are same. While the situation
-			 * will stop print when that task schedule out.
-			 */
-			|| cur_sp != thread_saved_sp(tsk)
-			|| cur_fp != thread_saved_fp(tsk))) {
-			printk("The task:%s had been rescheduled!\n",
-				tsk->comm);
-			break;
-		}
-
 		/* skip until specified stack frame */
 		if (!skip) {
 			dump_backtrace_entry(frame.pc);
@@ -866,9 +848,8 @@ static int bug_handler(struct pt_regs *regs, unsigned int esr)
 }
 
 static struct break_hook bug_break_hook = {
-	.esr_val = 0xf2000000 | BUG_BRK_IMM,
-	.esr_mask = 0xffffffff,
 	.fn = bug_handler,
+	.imm = BUG_BRK_IMM,
 };
 
 /*
@@ -884,7 +865,5 @@ int __init early_brk64(unsigned long addr, unsigned int esr,
 /* This registration must happen early, before debug_traps_init(). */
 void __init trap_init(void)
 {
-
-	register_break_hook(&bug_break_hook);
-
+	register_kernel_break_hook(&bug_break_hook);
 }

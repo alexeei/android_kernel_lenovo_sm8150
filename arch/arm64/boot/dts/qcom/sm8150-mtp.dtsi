@@ -1,4 +1,4 @@
-/* Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -15,9 +15,7 @@
 
 #include "sm8150-pmic-overlay.dtsi"
 #include "sm8150-sde-display.dtsi"
-
-#include "sm8150-camera-sensor-mtp.dtsi"
-
+//#include "sm8150-camera-sensor-mtp.dtsi"
 #include "sm8150-thermal-overlay.dtsi"
 
 &qupv3_se4_i2c {
@@ -107,15 +105,6 @@
 		qcom,finger-detect-gpio = <&pm8150_gpios 1 0>;
 	};
 };
-
-
-&dsi_panel_pwr_supply_vdd_no_labibb {
-	qcom,panel-supply-entry@1 {
-		qcom,supply-min-voltage = <1800000>;
-		qcom,supply-max-voltage = <1800000>;
-	};
-};
-
 
 &dsi_sharp_4k_dsc_cmd {
 	qcom,panel-supply-entries = <&dsi_panel_pwr_supply>;

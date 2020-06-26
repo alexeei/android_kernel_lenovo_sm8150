@@ -220,8 +220,7 @@ static void ufshcd_update_uic_error_cnt(struct ufs_hba *hba, u32 reg, int type)
 /* Query request retries */
 #define QUERY_REQ_RETRIES 3
 /* Query request timeout */
-
-#define QUERY_REQ_TIMEOUT 1500 /* 1.5 seconds */
+#define QUERY_REQ_TIMEOUT 3000 /* 3.0 seconds */
 
 /* Task management command timeout */
 #define TM_CMD_TIMEOUT	100 /* msecs */
@@ -3844,9 +3843,7 @@ static int ufshcd_queuecommand(struct Scsi_Host *host, struct scsi_cmnd *cmd)
 
 	err = ufshcd_map_sg(hba, lrbp);
 	if (err) {
-
 		ufshcd_release(hba);
-
 		lrbp->cmd = NULL;
 		clear_bit_unlock(tag, &hba->lrb_in_use);
 		ufshcd_release_all(hba);
@@ -5146,9 +5143,7 @@ static int ufshcd_uic_pwr_ctrl(struct ufs_hba *hba, struct uic_command *cmd)
 
 more_wait:
 	if (!wait_for_completion_timeout(hba->uic_async_done,
-
 					 msecs_to_jiffies(UIC_PWR_CTRL_TIMEOUT))) {
-
 		u32 intr_status = 0;
 		s64 ts_since_last_intr;
 
@@ -11169,7 +11164,6 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 	ufshcd_add_sysfs_nodes(hba);
 
 	device_enable_async_suspend(dev);
-
 
 	return 0;
 

@@ -16,10 +16,7 @@ config ARM64
 	select ARCH_HAS_GCOV_PROFILE_ALL
 	select ARCH_HAS_GIGANTIC_PAGE if (MEMORY_ISOLATION && COMPACTION) || CMA
 	select ARCH_HAS_KCOV
-<<<<<<< HEAD
 	select ARCH_HAS_REFCOUNT_FULL
-=======
->>>>>>> origin1/kernel.lnx.4.14.r4-rel
 	select ARCH_HAS_SET_MEMORY
 	select ARCH_HAS_SG_CHAIN
 	select ARCH_HAS_STRICT_KERNEL_RWX
@@ -65,7 +62,6 @@ config ARM64
 	select CPU_PM if (SUSPEND || CPU_IDLE)
 	select DCACHE_WORD_ACCESS
 	select EDAC_SUPPORT
-	select FRAME_POINTER
 	select GENERIC_ALLOCATOR
 	select GENERIC_ARCH_TOPOLOGY
 	select GENERIC_CLOCKEVENTS
@@ -91,6 +87,7 @@ config ARM64
 	select HAVE_ARCH_BITREVERSE
 	select HAVE_ARCH_HUGE_VMAP
 	select HAVE_ARCH_JUMP_LABEL
+	select HAVE_ARCH_JUMP_LABEL_RELATIVE
 	select HAVE_ARCH_KASAN if SPARSEMEM_VMEMMAP && !(ARM64_16K_PAGES && ARM64_VA_BITS_48)
 	select HAVE_ARCH_KGDB
 	select HAVE_ARCH_MMAP_RND_BITS
@@ -316,7 +313,7 @@ source "arch/arm64/Kconfig.platforms"
 
 choice
 	bool "Product selection"
-	default PRODUCT_ZIPPO
+	default PRODUCT_HEART
 	help
 		select build product
 
@@ -761,7 +758,6 @@ config NR_CPUS
 	# These have to remain sorted largest to smallest
 	default "64"
 
-
 config LITTLE_CPU_MASK
 	int "Bitmask of available LITTLE CPUs"
 	help
@@ -782,7 +778,6 @@ config PRIME_CPU_MASK
 	  This is a bitmask specifying which of the CPUs are prime in a
 	  heterogeneous system. Use 0 if you are unsure, which just results in
 	  this storing the bitmask of all available CPUs.
-
 
 config HOTPLUG_CPU
 	bool "Support for hot-pluggable CPUs"
@@ -1515,5 +1510,5 @@ source "arch/arm64/crypto/Kconfig"
 endif
 
 source "lib/Kconfig"
-source "techpack/Kconfig"
 
+source "techpack/Kconfig"

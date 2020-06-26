@@ -1053,7 +1053,6 @@ EXPORT_SYMBOL(mipi_dsi_dcs_set_tear_scanline);
  *
  * Return: 0 on success or a negative error code on failure.
  */
-
 static u16 curr_bl = 0xff;
 #ifdef CONFIG_PRODUCT_ZIPPO
 extern int dsi_panel_on_hbm;
@@ -1071,7 +1070,6 @@ int mipi_dsi_dcs_set_display_brightness(struct mipi_dsi_device *dsi,
 		return 0;
 	}
 #endif
-
 	err = mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_DISPLAY_BRIGHTNESS,
 				 payload, sizeof(payload));
 	if (err < 0)
@@ -1080,7 +1078,6 @@ int mipi_dsi_dcs_set_display_brightness(struct mipi_dsi_device *dsi,
 	return 0;
 }
 EXPORT_SYMBOL(mipi_dsi_dcs_set_display_brightness);
-
 
 int mipi_dsi_dcs_set_display_brightness_hbm(struct mipi_dsi_device *dsi,
 					u16 brightness)
@@ -1185,7 +1182,6 @@ int mipi_dsi_dcs_set_elvss_dim_off(struct mipi_dsi_device *dsi,
 	return 0;
 }
 EXPORT_SYMBOL(mipi_dsi_dcs_set_elvss_dim_off);
-
 
 /**
  * mipi_dsi_dcs_get_display_brightness() - gets the current brightness value

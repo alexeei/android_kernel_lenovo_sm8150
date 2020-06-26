@@ -1,4 +1,4 @@
-/* Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2019, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -19,7 +19,6 @@
 		polling-delay = <0>;
 		thermal-governor = "user_space";
 		thermal-sensors = <&tsens0 0>;
-		wake-capable-sensor;
 		trips {
 			active-config0 {
 				temperature = <125000>;
@@ -39,7 +38,6 @@
 		polling-delay = <0>;
 		thermal-governor = "user_space";
 		thermal-sensors = <&tsens0 1>;
-		wake-capable-sensor;
 		trips {
 			active-config0 {
 				temperature = <125000>;
@@ -59,7 +57,6 @@
 		polling-delay = <0>;
 		thermal-governor = "user_space";
 		thermal-sensors = <&tsens0 2>;
-		wake-capable-sensor;
 		trips {
 			active-config0 {
 				temperature = <125000>;
@@ -79,7 +76,6 @@
 		polling-delay = <0>;
 		thermal-governor = "user_space";
 		thermal-sensors = <&tsens0 3>;
-		wake-capable-sensor;
 		trips {
 			active-config0 {
 				temperature = <125000>;
@@ -99,7 +95,6 @@
 		polling-delay = <0>;
 		thermal-sensors = <&tsens0 4>;
 		thermal-governor = "user_space";
-		wake-capable-sensor;
 		trips {
 			active-config0 {
 				temperature = <125000>;
@@ -119,7 +114,6 @@
 		polling-delay = <0>;
 		thermal-sensors = <&tsens0 5>;
 		thermal-governor = "user_space";
-		wake-capable-sensor;
 		trips {
 			active-config0 {
 				temperature = <125000>;
@@ -139,7 +133,6 @@
 		polling-delay = <0>;
 		thermal-sensors = <&tsens0 6>;
 		thermal-governor = "user_space";
-		wake-capable-sensor;
 		trips {
 			active-config0 {
 				temperature = <125000>;
@@ -159,7 +152,6 @@
 		polling-delay = <0>;
 		thermal-governor = "low_limits_floor";
 		thermal-sensors = <&tsens0 0>;
-		wake-capable-sensor;
 		tracks-low;
 		trips {
 			aoss0_trip: active-config0 {
@@ -193,7 +185,6 @@
 		polling-delay = <0>;
 		thermal-governor = "low_limits_floor";
 		thermal-sensors = <&tsens0 1>;
-		wake-capable-sensor;
 		tracks-low;
 		trips {
 			mdm_q6_trip: active-config0 {
@@ -227,7 +218,6 @@
 		polling-delay = <0>;
 		thermal-governor = "low_limits_floor";
 		thermal-sensors = <&tsens0 2>;
-		wake-capable-sensor;
 		tracks-low;
 		trips {
 			ipa_trip: active-config0 {
@@ -261,7 +251,6 @@
 		polling-delay = <0>;
 		thermal-governor = "low_limits_floor";
 		thermal-sensors = <&tsens0 3>;
-		wake-capable-sensor;
 		tracks-low;
 		trips {
 			cpu0_trip: active-config0 {
@@ -295,7 +284,6 @@
 		polling-delay = <0>;
 		thermal-sensors = <&tsens0 4>;
 		thermal-governor = "low_limits_floor";
-		wake-capable-sensor;
 		tracks-low;
 		trips {
 			mdm_5g_trip: active-config0 {
@@ -329,7 +317,6 @@
 		polling-delay = <0>;
 		thermal-sensors = <&tsens0 5>;
 		thermal-governor = "low_limits_floor";
-		wake-capable-sensor;
 		tracks-low;
 		trips {
 			mdm_vpe_trip: active-config0 {
@@ -363,7 +350,6 @@
 		polling-delay = <0>;
 		thermal-sensors = <&tsens0 6>;
 		thermal-governor = "low_limits_floor";
-		wake-capable-sensor;
 		tracks-low;
 		trips {
 			mdm_core_trip: active-config0 {

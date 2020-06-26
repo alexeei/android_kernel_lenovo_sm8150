@@ -342,9 +342,7 @@ static void kgsl_destroy_ion(struct kgsl_dma_buf_meta *meta)
 	if (meta != NULL) {
 		remove_dmabuf_list(meta);
 		dma_buf_unmap_attachment(meta->attach, meta->table,
-
 			DMA_FROM_DEVICE);
-
 		dma_buf_detach(meta->dmabuf, meta->attach);
 		dma_buf_put(meta->dmabuf);
 		kfree(meta);
@@ -518,7 +516,6 @@ static int kgsl_mem_entry_attach_process(struct kgsl_device *device,
 /* Detach a memory entry from a process and unmap it from the MMU */
 static void kgsl_mem_entry_detach_process(struct kgsl_mem_entry *entry)
 {
-
 	if (entry == NULL)
 		return;
 
@@ -531,11 +528,7 @@ static void kgsl_mem_entry_detach_process(struct kgsl_mem_entry *entry)
 		idr_remove(&entry->priv->mem_idr, entry->id);
 	entry->id = 0;
 
-
-	type = kgsl_memdesc_usermem_type(&entry->memdesc);
-
-	if (type != KGSL_MEM_ENTRY_ION)
-		entry->priv->gpumem_mapped -= entry->memdesc.mapsize;
+	entry->priv->gpumem_mapped -= entry->memdesc.mapsize;
 
 	spin_unlock(&entry->priv->mem_lock);
 
@@ -2803,7 +2796,6 @@ static int kgsl_setup_dma_buf(struct kgsl_device *device,
 
 	sg_table = dma_buf_map_attachment(attach, DMA_TO_DEVICE);
 
-
 	if (IS_ERR_OR_NULL(sg_table)) {
 		ret = PTR_ERR(sg_table);
 		goto out;
@@ -4778,7 +4770,6 @@ static int kgsl_mmap(struct file *file, struct vm_area_struct *vma)
 		}
 		m->mapsize = m->size;
 		entry->priv->gpumem_mapped += m->mapsize;
-
 	}
 
 	vma->vm_file = file;
@@ -4913,10 +4904,6 @@ int kgsl_device_platform_probe(struct kgsl_device *device)
 	status = _register_device(device);
 	if (status)
 		return status;
-
-
-	/* Initialize logging first, so that failures below actually print. */
-	kgsl_device_debugfs_init(device);
 
 	/* Disable the sparse ioctl invocation as they are not used */
 	device->flags &= ~KGSL_FLAG_SPARSE;
@@ -5065,8 +5052,6 @@ error_close_mmu:
 error_pwrctrl_close:
 	kgsl_pwrctrl_close(device);
 error:
-
-	kgsl_device_debugfs_close(device);
 	_unregister_device(device);
 	return status;
 }
@@ -5094,7 +5079,6 @@ void kgsl_device_platform_remove(struct kgsl_device *device)
 
 	kgsl_pwrctrl_close(device);
 
-	kgsl_device_debugfs_close(device);
 	_unregister_device(device);
 }
 EXPORT_SYMBOL(kgsl_device_platform_remove);
@@ -5129,9 +5113,7 @@ static void kgsl_core_exit(void)
 static int __init kgsl_core_init(void)
 {
 	int result = 0;
-
 	struct sched_param param = { .sched_priority = 16 };
-
 
 	/* alloc major and minor device numbers */
 	result = alloc_chrdev_region(&kgsl_driver.major, 0, KGSL_DEVICE_MAX,

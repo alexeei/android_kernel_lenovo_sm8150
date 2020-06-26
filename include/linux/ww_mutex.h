@@ -69,7 +69,6 @@ struct ww_mutex {
 		, .mutex_name = #ww_class "_mutex" \
 		, .is_wait_die = _is_wait_die }
 
-
 #define __WW_MUTEX_INITIALIZER(lockname, class) \
 		{ .base =  __MUTEX_INITIALIZER(lockname.base) \
 		__WW_CLASS_MUTEX_INITIALIZER(lockname, class) }
@@ -79,7 +78,6 @@ struct ww_mutex {
 
 #define DEFINE_WW_CLASS(classname) \
 	struct ww_class classname = __WW_CLASS_INITIALIZER(classname, 0)
-
 
 #define DEFINE_WW_MUTEX(mutexname, ww_class) \
 	struct ww_mutex mutexname = __WW_MUTEX_INITIALIZER(mutexname, ww_class)

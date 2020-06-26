@@ -91,6 +91,7 @@
 #include <linux/livepatch.h>
 #include <linux/thread_info.h>
 #include <linux/cpufreq_times.h>
+#include <linux/simple_lmk.h>
 
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
@@ -103,6 +104,11 @@
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/task.h>
+#ifdef CONFIG_USER_NS
+extern int unprivileged_userns_clone;
+#else
+#define unprivileged_userns_clone 0
+#endif
 
 /*
  * Minimum number of threads to boot the kernel
@@ -950,6 +956,7 @@ static inline void __mmput(struct mm_struct *mm)
 	}
 	if (mm->binfmt)
 		module_put(mm->binfmt->module);
+        simple_lmk_mm_freed(mm);
 	mmdrop(mm);
 }
 
@@ -1588,6 +1595,10 @@ static __latent_entropy struct task_struct *copy_process(
 
 	if ((clone_flags & (CLONE_NEWUSER|CLONE_FS)) == (CLONE_NEWUSER|CLONE_FS))
 		return ERR_PTR(-EINVAL);
+
+	if ((clone_flags & CLONE_NEWUSER) && !unprivileged_userns_clone)
+		if (!capable(CAP_SYS_ADMIN))
+			return ERR_PTR(-EPERM);
 
 	/*
 	 * Thread groups must share signals as well, and detached threads
@@ -2395,6 +2406,12 @@ SYSCALL_DEFINE1(unshare, unsigned long, unshare_flags)
 	 */
 	if (unshare_flags & CLONE_NEWNS)
 		unshare_flags |= CLONE_FS;
+
+	if ((unshare_flags & CLONE_NEWUSER) && !unprivileged_userns_clone) {
+		err = -EPERM;
+		if (!capable(CAP_SYS_ADMIN))
+			goto bad_unshare_out;
+	}
 
 	err = check_unshare_flags(unshare_flags);
 	if (err)
