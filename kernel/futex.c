@@ -1559,7 +1559,8 @@ static void mark_wake_futex(struct wake_q_head *wake_q, struct futex_q *q)
 	 * Queue the task for later wakeup for after we've released
 	 * the hb->lock. wake_q_add() grabs reference to p.
 	 */
-	wake_q_add_safe(wake_q, p);
+	wake_q_add(wake_q, p);
+	put_task_struct(p);
 }
 
 /*
@@ -4215,3 +4216,4 @@ static int __init futex_init(void)
 	return 0;
 }
 core_initcall(futex_init);
+
