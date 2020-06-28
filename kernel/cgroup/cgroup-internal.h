@@ -186,9 +186,10 @@ int cgroup_migrate(struct task_struct *leader, bool threadgroup,
 
 int cgroup_attach_task(struct cgroup *dst_cgrp, struct task_struct *leader,
 		       bool threadgroup);
-struct task_struct *cgroup_procs_write_start(char *buf, bool threadgroup)
+struct task_struct *cgroup_procs_write_start(char *buf, bool threadgroup,
+					     bool *locked)
 	__acquires(&cgroup_threadgroup_rwsem);
-void cgroup_procs_write_finish(struct task_struct *task)
+void cgroup_procs_write_finish(struct task_struct *task, bool locked)
 	__releases(&cgroup_threadgroup_rwsem);
 
 void cgroup_lock_and_drain_offline(struct cgroup *cgrp);
@@ -221,3 +222,4 @@ struct dentry *cgroup1_mount(struct file_system_type *fs_type, int flags,
 			     struct cgroup_namespace *ns);
 
 #endif /* __CGROUP_INTERNAL_H */
+
