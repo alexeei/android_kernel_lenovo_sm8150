@@ -296,7 +296,6 @@ void sdhci_msm_pm_qos_cpu_vote(struct sdhci_host *host,
 		struct sdhci_msm_pm_qos_latency *latency, int cpu);
 bool sdhci_msm_pm_qos_cpu_unvote(struct sdhci_host *host, int cpu, bool async);
 int sdhci_msm_hs400_dll_calibration(struct sdhci_host *host);
-int msm_init_cm_dll(struct sdhci_host *host);
 int msm_config_cm_dll_phase(struct sdhci_host *host, u8 phase);
 void sdhci_msm_set_mmc_drv_type(struct sdhci_host *host, u32 opcode,
 		u8 drv_type);

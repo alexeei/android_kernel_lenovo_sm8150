@@ -374,10 +374,6 @@ enum vdd_io_level {
 	VDD_IO_SET_LEVEL,
 };
 
-enum dll_init_context {
-	DLL_INIT_NORMAL = 0,
-	DLL_INIT_FROM_CX_COLLAPSE_EXIT,
-};
 
 enum dll_init_context {
 	DLL_INIT_NORMAL = 0,
