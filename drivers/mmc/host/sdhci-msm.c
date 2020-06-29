@@ -375,10 +375,6 @@ enum vdd_io_level {
 };
 
 
-enum dll_init_context {
-	DLL_INIT_NORMAL = 0,
-	DLL_INIT_FROM_CX_COLLAPSE_EXIT,
-};
 
 static unsigned int sdhci_msm_get_sup_clk_rate(struct sdhci_host *host,
 						u32 req_clk);
