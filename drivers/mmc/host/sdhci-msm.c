@@ -4734,6 +4734,8 @@ static bool sdhci_msm_is_bootdevice(struct device *dev)
 		else
 			return false;
 	}
+		return true;
+}
 	
 	static const struct sdhci_pltfm_data sdhci_msm_pdata = {
 	.quirks = SDHCI_QUIRK_BROKEN_CARD_DETECTION |
@@ -4744,6 +4746,7 @@ static bool sdhci_msm_is_bootdevice(struct device *dev)
 
 	.quirks2 = SDHCI_QUIRK2_PRESET_VALUE_BROKEN,
 	.ops = &sdhci_msm_ops,
+	
 };
 	
 	
