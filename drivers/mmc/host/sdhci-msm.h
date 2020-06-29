@@ -24,6 +24,11 @@
 #define NUM_TUNING_PHASES		16
 #define MAX_DRV_TYPES_SUPPORTED_HS200	4
 
+enum dll_init_context {
+        DLL_INIT_NORMAL = 0,
+        DLL_INIT_FROM_CX_COLLAPSE_EXIT,
+};
+
 /* This structure keeps information per regulator */
 struct sdhci_msm_reg_data {
 	/* voltage regulator handle */
@@ -299,6 +304,7 @@ int sdhci_msm_hs400_dll_calibration(struct sdhci_host *host);
 int msm_config_cm_dll_phase(struct sdhci_host *host, u8 phase);
 void sdhci_msm_set_mmc_drv_type(struct sdhci_host *host, u32 opcode,
 		u8 drv_type);
+int msm_init_cm_dll(struct sdhci_host *host, enum dll_init_context init_context);
 int msm_find_most_appropriate_phase(struct sdhci_host *host,
 				u8 *phase_table, u8 total_phases);
 int sdhci_msm_execute_tuning(struct sdhci_host *host, u32 opcode);
