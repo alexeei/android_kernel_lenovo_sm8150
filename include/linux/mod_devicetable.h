@@ -728,3 +728,4 @@ struct mhi_device_id {
 
 
 #endif /* LINUX_MOD_DEVICETABLE_H */
+
