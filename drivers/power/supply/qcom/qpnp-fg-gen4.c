@@ -22,6 +22,7 @@
 #include <linux/platform_device.h>
 #include <linux/qpnp/qpnp-pbs.h>
 #include <linux/qpnp/qpnp-revid.h>
+#include <linux/syscalls.h>
 #include <linux/thermal.h>
 #include "fg-core.h"
 #include "fg-reg.h"
