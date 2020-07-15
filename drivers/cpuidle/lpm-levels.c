@@ -1502,9 +1502,9 @@ static void lpm_cpuidle_s2idle(struct cpuidle_device *dev,
 
 	cpu_prepare(cpu, idx, true);
 	cluster_prepare(cpu->parent, cpumask, idx, false, 0);
-
+	cpuidle_set_idle_cpu(dev->cpu);
 	success = psci_enter_sleep(cpu, idx, false);
-
+	cpuidle_clear_idle_cpu(dev->cpu);
 	cluster_unprepare(cpu->parent, cpumask, idx, false, 0, success);
 	cpu_unprepare(cpu, idx, true);
 

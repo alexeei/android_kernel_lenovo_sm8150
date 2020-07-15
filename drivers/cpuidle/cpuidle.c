@@ -37,8 +37,20 @@ static int enabled_devices;
 static int off __read_mostly;
 static int initialized __read_mostly;
 
-static void cpuidle_set_idle_cpu(unsigned int cpu);
-static void cpuidle_clear_idle_cpu(unsigned int cpu);
+#ifdef CONFIG_SMP
+static atomic_t idled = ATOMIC_INIT(0);
+
+void cpuidle_set_idle_cpu(unsigned int cpu)
+{
+	atomic_or(BIT(cpu), &idled);
+}
+
+void cpuidle_clear_idle_cpu(unsigned int cpu)
+{
+	atomic_andnot(BIT(cpu), &idled);
+}
+
+#endif
 
 int cpuidle_disabled(void)
 {
@@ -222,9 +234,9 @@ int cpuidle_enter_state(struct cpuidle_device *dev, struct cpuidle_driver *drv,
 	time_start = ns_to_ktime(local_clock());
 
 	stop_critical_timings();
-	cpuidle_set_idle_cpu(dev->cpu);
+	
 	entered_state = target_state->enter(dev, drv, index);
-	cpuidle_clear_idle_cpu(dev->cpu);
+	
 	start_critical_timings();
 
 	sched_clock_idle_wakeup_event();
