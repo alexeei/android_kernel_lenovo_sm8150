@@ -5251,8 +5251,6 @@ static DEVICE_ATTR(doze_mode, 0644,
 			sysfs_doze_mode_write);
 
 static struct attribute *display_fs_attrs[] = {
-	&dev_attr_doze_status.attr,
-	&dev_attr_doze_mode.attr,
 	NULL,
 };
 static struct attribute_group display_fs_attrs_group = {
