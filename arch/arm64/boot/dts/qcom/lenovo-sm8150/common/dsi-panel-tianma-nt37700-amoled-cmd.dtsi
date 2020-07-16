@@ -58,6 +58,8 @@
 				qcom,mdss-dsi-panel-clockrate = <1094000000>;
 				qcom,mdss-dsi-h-front-porch = <100>;
 				qcom,mdss-dsi-h-back-porch = <100>;
+				qcom,disp-doze-lpm-backlight = <20>;
+				qcom,disp-doze-hbm-backlight = <266>;
 				qcom,mdss-dsi-h-pulse-width = <10>;
 				qcom,mdss-dsi-h-sync-skew = <0>;
 				qcom,mdss-dsi-v-back-porch = <4>;
