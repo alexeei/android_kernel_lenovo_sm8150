@@ -518,6 +518,8 @@ static int __maybe_unused xhci_plat_runtime_idle(struct device *dev)
 	pm_runtime_autosuspend(dev);
 	return -EBUSY;
 
+
+
 }
 
 static int __maybe_unused xhci_plat_runtime_suspend(struct device *dev)
