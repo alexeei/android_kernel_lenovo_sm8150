@@ -802,8 +802,6 @@ static int dsi_panel_update_backlight(struct dsi_panel *panel,
 		return -EINVAL;
 	}
 
-        if (panel->fod_hbm_status)
-		return 0;
 
 	dsi = &panel->mipi_device;
 	
@@ -3597,26 +3595,6 @@ end:
 }
 
 #define DOZE_MIN_BRIGHTNESS_LEVEL	5
-static int dsi_panel_parse_mi_config(struct dsi_panel *panel,
-				     struct device_node *of_node)
-{
-	struct dsi_parser_utils *utils = &panel->utils;
-	int rc = 0;
-
-	rc = utils->read_u32(of_node,
-			"qcom,disp-doze-backlight-threshold", &panel->doze_backlight_threshold);
-	if (rc) {
-		panel->doze_backlight_threshold = DOZE_MIN_BRIGHTNESS_LEVEL;
-		pr_info("default doze backlight threshold is %d\n", DOZE_MIN_BRIGHTNESS_LEVEL);
-	} else {
-		pr_info("doze backlight threshold %d \n", panel->doze_backlight_threshold);
-	}
-
-	panel->doze_state = false;
-	panel->fod_hbm_status = false;
-
-	return rc;
-}
 
 struct dsi_panel *dsi_panel_get(struct device *parent,
 				struct device_node *of_node,
@@ -3728,9 +3706,6 @@ struct dsi_panel *dsi_panel_get(struct device *parent,
 	if (rc)
 		pr_debug("failed to parse esd config, rc=%d\n", rc);
 		
-	rc = dsi_panel_parse_mi_config(panel, of_node);
-	if (rc)
-		pr_err("failed to parse mi config, rc=%d\n", rc);
 		
 	panel->doze_mode = DSI_DOZE_LPM;
 	panel->doze_enabled = false;
