@@ -49,30 +49,6 @@
 		qcom,mdss-dsi-te-using-te-pin;
 		qcom,mdss-dsi-lp11-init;
 		//qcom,mdss-dsi-tx-eot-append;
-		qcom,disp-fod-dim-lut = <
-		/* brightness, alpha */
-		0	0xFF
-		4	0xEB
-		8	0xEA
-		12	0xE9
-		13	0xE8
-		20	0xE5
-		24	0xE3
-		30	0xE0
-		68	0xD0
-		133	0xC0
-		218	0xB0
-		328	0xA0
-		486	0x90
-		642	0x80
-		832	0x70
-		1043	0x60
-		1267	0x50
-		1500	0x40
-		1770	0x30
-		2000	0x24
-		2047	0x21
-		>;		
 		qcom,mdss-dsi-h-sync-pulse = <0>;
 		qcom,mdss-dsi-display-timings {
 			timing@0{
@@ -82,8 +58,6 @@
 				qcom,mdss-dsi-panel-clockrate = <1094000000>;
 				qcom,mdss-dsi-h-front-porch = <100>;
 				qcom,mdss-dsi-h-back-porch = <100>;
-				qcom,disp-doze-lpm-backlight = <20>;
-				qcom,disp-doze-hbm-backlight = <266>;
 				qcom,mdss-dsi-h-pulse-width = <10>;
 				qcom,mdss-dsi-h-sync-skew = <0>;
 				qcom,mdss-dsi-v-back-porch = <4>;

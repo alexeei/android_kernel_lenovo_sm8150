@@ -59,9 +59,9 @@ static const struct of_device_id dsi_display_dt_match[] = {
 	{}
 };
 
-
+#ifdef CONFIG_EXPOSURE_ADJUSTMENT
 struct dsi_display *primary_display;
-								 
+#endif								 
 static void dsi_display_mask_ctrl_error_interrupts(struct dsi_display *display,
 			u32 mask, bool enable)
 {
@@ -244,7 +244,58 @@ error:
 	return rc;
 }
 
+int dsi_display_set_backlight_hbm(struct drm_connector *connector,
+	void *display, u32 bl_lvl)
+{
+	struct dsi_display *dsi_display = display;
+	struct dsi_panel *panel;
+	u64 bl_temp;
+	int rc = 0;
 
+	if (dsi_display == NULL || dsi_display->panel == NULL)
+		return -EINVAL;
+
+	panel = dsi_display->panel;
+
+	mutex_lock(&panel->panel_lock);
+	if (!dsi_panel_initialized(panel)) {
+		rc = -EINVAL;
+		goto error;
+	}
+
+	bl_temp = bl_lvl;
+	pr_debug(" bl_lvl = %u\n", (u32)bl_temp);
+
+	rc = dsi_display_clk_ctrl(dsi_display->dsi_clk_handle,
+			DSI_CORE_CLK, DSI_CLK_ON);
+	if (rc) {
+		pr_err("[%s] failed to enable DSI core clocks, rc=%d\n",
+		       dsi_display->name, rc);
+		goto error;
+	}
+
+	rc = dsi_panel_set_backlight_hbm(panel, (u32)bl_temp);
+	if (rc)
+		pr_err("unable to set backlight\n");
+		
+	if (panel->doze_state) {
+		rc = dsi_panel_set_doze_backlight(panel, (u32)bl_temp);
+		if (rc)
+			pr_err("unable to set doze backlight\n");
+	}
+
+	rc = dsi_display_clk_ctrl(dsi_display->dsi_clk_handle,
+			DSI_CORE_CLK, DSI_CLK_OFF);
+	if (rc) {
+		pr_err("[%s] failed to disable DSI core clocks, rc=%d\n",
+		       dsi_display->name, rc);
+		goto error;
+	}
+
+error:
+	mutex_unlock(&panel->panel_lock);
+	return rc;
+}
 
 static int dsi_display_cmd_engine_enable(struct dsi_display *display)
 {
@@ -5191,23 +5242,6 @@ static ssize_t sysfs_doze_mode_write(struct device *dev,
 	return count;
 }
 
-static ssize_t sysfs_fod_ui_read(struct device *dev,
-	struct device_attribute *attr, char *buf)
-{
-	struct dsi_display *display;
-	bool status;
-
-	display = dev_get_drvdata(dev);
-	if (!display) {
-		pr_err("Invalid display\n");
-		return -EINVAL;
-	}
-
-	status = atomic_read(&display->fod_ui);
-
-	return snprintf(buf, PAGE_SIZE, "%d\n", status);
-}
-
 static DEVICE_ATTR(doze_status, 0644,
 			sysfs_doze_status_read,
 			sysfs_doze_status_write);
@@ -5215,15 +5249,8 @@ static DEVICE_ATTR(doze_status, 0644,
 static DEVICE_ATTR(doze_mode, 0644,
 			sysfs_doze_mode_read,
 			sysfs_doze_mode_write);
-			
-static DEVICE_ATTR(fod_ui, 0444,
-			sysfs_fod_ui_read,
-			NULL);
 
 static struct attribute *display_fs_attrs[] = {
-	&dev_attr_doze_status.attr,
-	&dev_attr_doze_mode.attr,
-	&dev_attr_fod_ui.attr,
 	NULL,
 };
 static struct attribute_group display_fs_attrs_group = {
@@ -5253,13 +5280,6 @@ static int dsi_display_sysfs_deinit(struct dsi_display *display)
 
 	return 0;
 
-}
-
-void dsi_display_set_fod_ui(struct dsi_display *display, bool status)
-{
-	struct device *dev = &display->pdev->dev;
-	atomic_set(&display->fod_ui, status);
-	sysfs_notify(&dev->kobj, NULL, "fod_ui");
 }
 
 /**
@@ -5558,7 +5578,6 @@ static void dsi_display_unbind(struct device *dev,
 	}
 
 	atomic_set(&display->clkrate_change_pending, 0);
-	atomic_set(&display->fod_ui, false);
 	(void)dsi_display_sysfs_deinit(display);
 	(void)dsi_display_debugfs_deinit(display);
 
@@ -6569,9 +6588,9 @@ int dsi_display_get_modes(struct dsi_display *display,
 exit:
 	*out_modes = display->modes;
 	rc = 0;
-
+#ifdef CONFIG_EXPOSURE_ADJUSTMENT
 	primary_display = display;
-							 
+#endif								 
 
 error:
 	if (rc)
@@ -7917,11 +7936,10 @@ int dsi_display_unprepare(struct dsi_display *display)
 	return rc;
 }
 
-
+#ifdef CONFIG_EXPOSURE_ADJUSTMENT
 struct dsi_display *get_main_display(void) {
 		return primary_display;
 }
-#ifdef CONFIG_EXPOSURE_ADJUSTMENT
 EXPORT_SYMBOL(get_main_display);
 #endif								 
 static int __init dsi_display_register(void)
