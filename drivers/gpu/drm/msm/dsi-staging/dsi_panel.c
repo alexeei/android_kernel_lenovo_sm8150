@@ -1989,8 +1989,6 @@ error:
 const char *cmd_set_prop_map[DSI_CMD_SET_MAX] = {
 	"qcom,mdss-dsi-pre-on-command",
 	"qcom,mdss-dsi-on-command",
-	"qcom,mdss-dsi-hbm-on-command",
-	"qcom,mdss-dsi-hbm-dim-off-command",
 	"qcom,mdss-dsi-post-panel-on-command",
 	"qcom,mdss-dsi-pre-off-command",
 	"qcom,mdss-dsi-off-command",
@@ -2016,7 +2014,7 @@ const char *cmd_set_prop_map[DSI_CMD_SET_MAX] = {
 	"qcom,mdss-dsi-doze-lbm-command",
 	"qcom,mdss-dsi-dispparam-hbm-fod-on-command",
 	"qcom,mdss-dsi-dispparam-hbm-fod-off-command",
-	"qcom,mdss-dsi-dispparam-dimmingoff-command",
+	
 };
 
 const char *cmd_set_state_map[DSI_CMD_SET_MAX] = {
@@ -2045,7 +2043,6 @@ const char *cmd_set_state_map[DSI_CMD_SET_MAX] = {
 	"qcom,mdss-dsi-qsync-off-commands-state",
 	"qcom,mdss-dsi-doze-hbm-command-state",
 	"qcom,mdss-dsi-doze-lbm-command-state",
-	"qcom,mdss-dsi-dispparam-dimmingoff-command-state",
 };
 
 static int dsi_panel_get_cmd_pkt_count(const char *data, u32 length, u32 *cnt)
