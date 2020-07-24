@@ -759,8 +759,7 @@ static int _sde_connector_update_dirty_properties(
 	return 0;
 }
 
-<<<<<<< HEAD
-=======
+
 void sde_connector_update_fod_hbm(struct drm_connector *connector)
 {
 	static atomic_t effective_status = ATOMIC_INIT(false);
@@ -796,7 +795,7 @@ void sde_connector_update_fod_hbm(struct drm_connector *connector)
 }
 
 
->>>>>>> 946e8a90c8a7... drm: msm: notify sysfs for fod ui changes
+
 int sde_connector_pre_kickoff(struct drm_connector *connector)
 {
 	struct sde_connector *c_conn;
@@ -829,6 +828,8 @@ int sde_connector_pre_kickoff(struct drm_connector *connector)
 	params.hdr_meta = &c_state->hdr_meta;
 
 	SDE_EVT32_VERBOSE(connector->base.id);
+	
+	sde_connector_update_fod_hbm(connector);
 
 	rc = c_conn->ops.pre_kickoff(connector, c_conn->display, &params);
 
