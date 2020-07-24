@@ -19,6 +19,8 @@
 #include <linux/of_gpio.h>
 #include <linux/err.h>
 
+#include <linux/msm_drm_notify.h>
+
 #include "msm_drv.h"
 #include "sde_connector.h"
 #include "msm_mmu.h"
