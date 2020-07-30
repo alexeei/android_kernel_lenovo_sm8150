@@ -361,6 +361,6 @@ int dsi_panel_set_doze_mode(struct dsi_panel *panel, enum dsi_doze_mode_type mod
 
 
 
-u32 dsi_panel_get_fod_dim_alpha(struct dsi_panel *panel);
+
 
 #endif /* _DSI_PANEL_H_ */
