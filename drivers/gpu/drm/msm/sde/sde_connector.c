@@ -760,38 +760,6 @@ static int _sde_connector_update_dirty_properties(
 }
 
 
-void sde_connector_update_fod_hbm(struct drm_connector *connector)
-{
-	static atomic_t effective_status = ATOMIC_INIT(false);
-	struct sde_crtc_state *cstate;
-	struct sde_connector *c_conn;
-	struct dsi_display *display;
-	bool status;
-
-	if (!connector) {
-		SDE_ERROR("invalid connector\n");
-		return;
-	}
-
-	c_conn = to_sde_connector(connector);
-	if (c_conn->connector_type != DRM_MODE_CONNECTOR_DSI)
-		return;
-
-	display = (struct dsi_display *) c_conn->display;
-
-	if (!c_conn->encoder || !c_conn->encoder->crtc ||
-			!c_conn->encoder->crtc->state)
-		return;
-
-	cstate = to_sde_crtc_state(c_conn->encoder->crtc->state);
-	status = cstate->fod_dim_layer != NULL;
-	if (atomic_xchg(&effective_status, status) == status)
-		return;
-
-	mutex_lock(&display->panel->panel_lock);
-	mutex_unlock(&display->panel->panel_lock);
-	dsi_display_set_fod_ui(display, status);
-}
 
 
 
