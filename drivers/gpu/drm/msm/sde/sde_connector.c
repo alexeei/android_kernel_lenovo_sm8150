@@ -760,9 +760,6 @@ static int _sde_connector_update_dirty_properties(
 }
 
 
-
-
-
 int sde_connector_pre_kickoff(struct drm_connector *connector)
 {
 	struct sde_connector *c_conn;
@@ -795,8 +792,7 @@ int sde_connector_pre_kickoff(struct drm_connector *connector)
 	params.hdr_meta = &c_state->hdr_meta;
 
 	SDE_EVT32_VERBOSE(connector->base.id);
-	
-	
+
 
 	rc = c_conn->ops.pre_kickoff(connector, c_conn->display, &params);
 

@@ -175,12 +175,6 @@ struct drm_panel_esd_config {
 	u32 groups;
 };
 
-#define BRIGHTNESS_ALPHA_PAIR_LEN 2
-struct brightness_alpha_pair {
-	u32 brightness;
-	u32 alpha;
-};
-
 struct dsi_panel {
 	const char *name;
 	const char *type;
@@ -232,9 +226,13 @@ struct dsi_panel {
 	
 	bool doze_enabled;
 	enum dsi_doze_mode_type doze_mode;
+<<<<<<< HEAD
 	
 	struct brightness_alpha_pair *fod_dim_lut;
 	u32 fod_dim_lut_count;
+=======
+	bool resend_ea;
+>>>>>>> parent of a8797fb560a0... drm: msm: implement fod handling
 
 	
 };
@@ -358,8 +356,6 @@ void dsi_panel_ext_bridge_put(struct dsi_panel *panel);
 int dsi_panel_set_doze_status(struct dsi_panel *panel, bool status);
 
 int dsi_panel_set_doze_mode(struct dsi_panel *panel, enum dsi_doze_mode_type mode);
-
-
 
 
 

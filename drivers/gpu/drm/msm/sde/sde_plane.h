@@ -399,5 +399,4 @@ void sde_plane_setup_src_split_order(struct drm_plane *plane,
 		enum sde_sspp_multirect_index rect_mode, bool enable);
 
 
-
 #endif /* _SDE_PLANE_H_ */
