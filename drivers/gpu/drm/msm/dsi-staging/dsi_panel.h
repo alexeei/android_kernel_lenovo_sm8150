@@ -226,13 +226,8 @@ struct dsi_panel {
 	
 	bool doze_enabled;
 	enum dsi_doze_mode_type doze_mode;
-<<<<<<< HEAD
-	
-	struct brightness_alpha_pair *fod_dim_lut;
-	u32 fod_dim_lut_count;
-=======
 	bool resend_ea;
->>>>>>> parent of a8797fb560a0... drm: msm: implement fod handling
+
 
 	
 };
