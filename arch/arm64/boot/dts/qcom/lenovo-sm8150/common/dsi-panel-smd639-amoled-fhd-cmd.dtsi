@@ -75,8 +75,6 @@
 				qcom,mdss-dsi-v-back-porch = <25>;
 				qcom,mdss-dsi-v-front-porch = <25>;
 				qcom,mdss-dsi-v-pulse-width = <4>;
-				qcom,disp-doze-lpm-backlight = <20>;
-				qcom,disp-doze-hbm-backlight = <266>;
 				qcom,mdss-dsi-h-left-border = <0>;
 				qcom,mdss-dsi-h-right-border = <0>;
 				qcom,mdss-dsi-v-top-border = <0>;
