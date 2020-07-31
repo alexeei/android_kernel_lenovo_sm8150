@@ -1040,7 +1040,8 @@ static int do_cpu_down(unsigned int cpu, enum cpuhp_state target)
 	 * versions that people use. Disallow taking big (and prime)
 	 * cores by userspace down completely.
 	 */
-	if (cpumask_intersects(cpumask_of(cpu), cpu_perf_mask) ||
+	if (cpumask_intersects(cpumask_of(cpu), cpu_lp_mask) ||
+	    cpumask_intersects(cpumask_of(cpu), cpu_perf_mask) ||
 	    cpumask_intersects(cpumask_of(cpu), cpu_perfp_mask)) {
 		pr_info("%s: trying to take down core %i\n", __func__, cpu);
 		return -EINVAL;
