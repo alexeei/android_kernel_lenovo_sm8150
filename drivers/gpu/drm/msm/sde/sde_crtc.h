@@ -292,6 +292,7 @@ struct sde_crtc {
 	u32 sbuf_rot_id_old;
 	u32 sbuf_rot_id_delta;
 	struct kthread_delayed_work idle_notify_work;
+	struct kthread_work early_wakeup_work;
 
 	struct sde_power_event *power_event;
 
