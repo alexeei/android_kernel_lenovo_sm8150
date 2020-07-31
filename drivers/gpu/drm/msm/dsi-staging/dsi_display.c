@@ -42,6 +42,7 @@
 #define MAX_NAME_SIZE	64
 
 #define DSI_CLOCK_BITRATE_RADIX 10
+#define DSI_FOD_HBM_RADIX 10
 #define MAX_TE_SOURCE_ID  2
 
 DEFINE_MUTEX(dsi_display_clk_mutex);
@@ -5135,34 +5136,11 @@ error:
 	return rc;
 }
 
-static ssize_t sysfs_doze_status_read(struct device *dev,
+static ssize_t sysfs_fod_hbm_read(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
 	struct dsi_display *display;
 	struct dsi_panel *panel;
-	bool status;
-
-	display = dev_get_drvdata(dev);
-	if (!display) {
-		pr_err("Invalid display\n");
-		return -EINVAL;
-	}
-
-	panel = display->panel;
-
-	mutex_lock(&panel->panel_lock);
-	status = panel->doze_enabled;
-	mutex_unlock(&panel->panel_lock);
-
-	return snprintf(buf, PAGE_SIZE, "%d\n", status);
-}
-
-static ssize_t sysfs_doze_status_write(struct device *dev,
-	struct device_attribute *attr, const char *buf, size_t count)
-{
-	struct dsi_display *display;
-	struct dsi_panel *panel;
-	bool status;
 	int rc = 0;
 
 	display = dev_get_drvdata(dev);
@@ -5171,50 +5149,22 @@ static ssize_t sysfs_doze_status_write(struct device *dev,
 		return -EINVAL;
 	}
 
-	rc = kstrtobool(buf, &status);
-	if (rc) {
-		pr_err("%s: kstrtobool failed. rc=%d\n", __func__, rc);
-		return rc;
-	}
-
 	panel = display->panel;
 
 	mutex_lock(&panel->panel_lock);
-	dsi_panel_set_doze_status(panel, status);
+	rc = snprintf(buf, PAGE_SIZE, "%d\n", panel->fod_hbm_status);
 	mutex_unlock(&panel->panel_lock);
 
-	return count;
+	return rc;
 }
 
-static ssize_t sysfs_doze_mode_read(struct device *dev,
-	struct device_attribute *attr, char *buf)
-{
-	enum dsi_doze_mode_type doze_mode;
-	struct dsi_display *display;
-	struct dsi_panel *panel;
-
-	display = dev_get_drvdata(dev);
-	if (!display) {
-		pr_err("Invalid display\n");
-		return -EINVAL;
-	}
-
-	panel = display->panel;
-
-	mutex_lock(&panel->panel_lock);
-	doze_mode = panel->doze_mode;
-	mutex_unlock(&panel->panel_lock);
-
-	return snprintf(buf, PAGE_SIZE, "%d\n", doze_mode);
-}
-
-static ssize_t sysfs_doze_mode_write(struct device *dev,
+static ssize_t sysfs_fod_hbm_write(struct device *dev,
 	struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct dsi_display *display;
 	struct dsi_panel *panel;
+	int fod_hbm_status;
 	int rc = 0;
-	int mode;
 
 	display = dev_get_drvdata(dev);
 	if (!display) {
@@ -5222,54 +5172,49 @@ static ssize_t sysfs_doze_mode_write(struct device *dev,
 		return -EINVAL;
 	}
 
-	rc = kstrtoint(buf, 10, &mode);
+	rc = kstrtoint(buf, DSI_FOD_HBM_RADIX, &fod_hbm_status);
 	if (rc) {
 		pr_err("%s: kstrtoint failed. rc=%d\n", __func__, rc);
 		return rc;
 	}
 
-	if (mode < DSI_DOZE_LPM || mode > DSI_DOZE_HBM) {
-		pr_err("%s: invalid value for doze mode\n", __func__);
-		return -EINVAL;
-	}
-
 	panel = display->panel;
 
 	mutex_lock(&panel->panel_lock);
-	dsi_panel_set_doze_mode(panel, (enum dsi_doze_mode_type) mode);
+	dsi_panel_set_fod_hbm_backlight(panel, !!fod_hbm_status);
 	mutex_unlock(&panel->panel_lock);
 
 	return count;
 }
 
-static DEVICE_ATTR(doze_status, 0644,
-			sysfs_doze_status_read,
-			sysfs_doze_status_write);
+static DEVICE_ATTR(fod_hbm, 0644,
+			sysfs_fod_hbm_read,
+			sysfs_fod_hbm_write);
 
-static DEVICE_ATTR(doze_mode, 0644,
-			sysfs_doze_mode_read,
-			sysfs_doze_mode_write);
-
-static struct attribute *display_fs_attrs[] = {
-	&dev_attr_doze_status.attr,
-	&dev_attr_doze_mode.attr,
+static struct attribute *fod_hbm_fs_attrs[] = {
+	&dev_attr_fod_hbm.attr,
 	NULL,
 };
-static struct attribute_group display_fs_attrs_group = {
-	.attrs = display_fs_attrs,
+static struct attribute_group fod_hbm_fs_attrs_group = {
+	.attrs = fod_hbm_fs_attrs,
 };
 
 static int dsi_display_sysfs_init(struct dsi_display *display)
 {
 	int rc = 0;
 	struct device *dev = &display->pdev->dev;
-	rc = sysfs_create_group(&dev->kobj, &display_fs_attrs_group);
+	
+	rc = sysfs_create_group(&dev->kobj,
+			&fod_hbm_fs_attrs_group);
 	if (rc)
-		pr_err("failed to create display device attributes");
+		pr_err("failed to create fod hbm device attributes");
+
 	if (display->panel->panel_mode == DSI_OP_CMD_MODE)
 		rc = sysfs_create_group(&dev->kobj,
 			&dynamic_dsi_clock_fs_attrs_group);
+
 	return rc;
+
 }
 
 static int dsi_display_sysfs_deinit(struct dsi_display *display)
